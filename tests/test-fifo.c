@@ -4602,6 +4602,18 @@ static bool pthread_wait_until_uint_bounded(atomic_uint *value,
     return false;
 }
 
+static bool pthread_wait_until_size_bounded(atomic_size_t *value,
+                                             size_t expected)
+{
+    for (size_t i = 0; i < 100000; i++) {
+        if (atomic_load_explicit(value, memory_order_acquire) >= expected)
+            return true;
+        sched_yield();
+    }
+
+    return false;
+}
+
 static void pthread_cancel_many(pthread_t *threads, size_t count)
 {
     for (size_t i = 0; i < count; i++)
@@ -4646,17 +4658,31 @@ static int run_pthread_condition_broadcast(size_t thread_count)
                false);
     }
 
-    ASSERT("registered broadcast waiters must still be asleep",
-           atomic_load_explicit(&completed, memory_order_acquire) == 0);
+    bool asleep_before =
+        atomic_load_explicit(&completed, memory_order_acquire) == 0;
 
     fifo_condition_broadcast(&condition);
 
+    bool frontier_ok =
+        atomic_load_explicit(&condition.wake_ticket,
+                             memory_order_acquire) == thread_count;
+
+    bool all_completed =
+        pthread_wait_until_size_bounded(&completed, thread_count);
+
+    if (!all_completed) {
+        pthread_cancel_many(threads, thread_count);
+    } else {
+        ASSERT("broadcast waiter threads must join",
+               pthread_join_many(threads, thread_count) == 0);
+    }
+
+    ASSERT("registered broadcast waiters must still be asleep",
+           asleep_before);
     ASSERT("broadcast must move wake frontier across every registered waiter",
-           atomic_load_explicit(&condition.wake_ticket,
-                                memory_order_acquire) == thread_count);
-    ASSERT("broadcast waiter threads must join",
-           pthread_join_many(threads, thread_count) == 0);
+           frontier_ok);
     ASSERT("broadcast must release every waiter",
+           all_completed &&
            atomic_load_explicit(&completed, memory_order_acquire) ==
            thread_count);
 
@@ -4708,17 +4734,31 @@ static int test_pthread_condition_signal_one(void)
         ASSERT("single condition waiter must register a ticket", false);
     }
 
-    ASSERT("single registered waiter must still be asleep before signal",
-           atomic_load_explicit(&completed, memory_order_acquire) == 0);
+    bool asleep_before =
+        atomic_load_explicit(&completed, memory_order_acquire) == 0;
 
     fifo_condition_signal(&condition);
 
+    bool frontier_ok =
+        atomic_load_explicit(&condition.wake_ticket,
+                             memory_order_acquire) == 1;
+
+    bool completed_ok = pthread_wait_until_size_bounded(&completed, 1);
+
+    if (!completed_ok) {
+        pthread_cancel(thread);
+        pthread_join(thread, NULL);
+    } else {
+        ASSERT("single condition waiter must join",
+               pthread_join(thread, NULL) == 0);
+    }
+
+    ASSERT("single registered waiter must still be asleep before signal",
+           asleep_before);
     ASSERT("signal must advance wake frontier by exactly one ticket",
-           atomic_load_explicit(&condition.wake_ticket,
-                                memory_order_acquire) == 1);
-    ASSERT("single condition waiter must join",
-           pthread_join(thread, NULL) == 0);
+           frontier_ok);
     ASSERT("signal must release the single waiter",
+           completed_ok &&
            atomic_load_explicit(&completed, memory_order_acquire) == 1);
 
     return 0;
@@ -4765,33 +4805,44 @@ static int run_pthread_condition_signal_one_of_many(size_t thread_count)
                false);
     }
 
-    ASSERT("all registered waiters must still be asleep before signal",
-           atomic_load_explicit(&completed, memory_order_acquire) == 0);
+    bool asleep_before =
+        atomic_load_explicit(&completed, memory_order_acquire) == 0;
 
     fifo_condition_signal(&condition);
 
-    ASSERT("signal with many waiters must advance wake frontier exactly once",
-           atomic_load_explicit(&condition.wake_ticket,
-                                memory_order_acquire) == 1);
+    bool signal_frontier_ok =
+        atomic_load_explicit(&condition.wake_ticket,
+                             memory_order_acquire) == 1;
 
-    for (size_t i = 0; i < 10000; i++) {
-        if (atomic_load_explicit(&completed, memory_order_acquire) != 0)
-            break;
-        sched_yield();
-    }
-
+    (void)pthread_wait_until_size_bounded(&completed, 1);
     observed = atomic_load_explicit(&completed, memory_order_acquire);
 
     fifo_condition_broadcast(&condition);
 
+    bool broadcast_frontier_ok =
+        atomic_load_explicit(&condition.wake_ticket,
+                             memory_order_acquire) == thread_count;
+
+    bool all_completed =
+        pthread_wait_until_size_bounded(&completed, thread_count);
+
+    if (!all_completed) {
+        pthread_cancel_many(threads, thread_count);
+    } else {
+        ASSERT("condition waiter threads must join after cleanup broadcast",
+               pthread_join_many(threads, thread_count) == 0);
+    }
+
+    ASSERT("all registered waiters must still be asleep before signal",
+           asleep_before);
+    ASSERT("signal with many waiters must advance wake frontier exactly once",
+           signal_frontier_ok);
     ASSERT("cleanup broadcast must move wake frontier to all registered waiters",
-           atomic_load_explicit(&condition.wake_ticket,
-                                memory_order_acquire) == thread_count);
-    ASSERT("condition waiter threads must join after cleanup broadcast",
-           pthread_join_many(threads, thread_count) == 0);
+           broadcast_frontier_ok);
     ASSERT("signal with multiple waiters must release one real waiter",
            observed == 1);
     ASSERT("cleanup broadcast must release all remaining waiters",
+           all_completed &&
            atomic_load_explicit(&completed, memory_order_acquire) ==
            thread_count);
 
