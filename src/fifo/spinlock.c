@@ -20,7 +20,6 @@
 
 void fifo_spinlock_init(fifo_spinlock_t *lock) {
 //     atomic_flag_clear(&lock->locked);
-	(void)lock;
 }
 
 void fifo_spinlock_lock(fifo_spinlock_t *lock)

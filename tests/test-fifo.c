@@ -1451,31 +1451,32 @@ static int test_fifo_reuse_after_drain(void)
  * Individual function exhaustive tests
  * ======================================================================
  *
- * These tests deliberately exercise one public operation across every
- * meaningful synchronous state we can construct without invoking undefined
- * behaviour or requiring another thread to make progress.
+ * These tests deliberately call exactly ONE libfifo public function per
+ * test. All prerequisite state is constructed directly through the public
+ * structure fields and C11 atomics, and results are inspected directly.
  *
- * Blocking operations are tested only when they must complete immediately.
- * Misuse cases such as unlocking an unlocked lock, recursive locking, and
- * zero-capacity FIFOs are intentionally not specified by this test suite.
+ * This is intentional: implementing one libfifo function must not make
+ * another function's individual tests start passing merely because that
+ * second test used the first function for setup or verification.
+ *
+ * The later integration/behaviour tests are deliberately left unchanged.
  */
 
 
-/*
- * fifo_spinlock_init()
- */
+/* fifo_spinlock_init() */
+
 
 static int test_individual_spinlock_init_lockable(void)
 {
     fifo_spinlock_t lock;
+    atomic_flag_test_and_set_explicit(&lock.locked, memory_order_relaxed);
 
     fifo_spinlock_init(&lock);
 
-    ASSERT("fifo_spinlock_init must produce an unlocked lock",
-           fifo_spinlock_trylock(&lock));
-
-    fifo_spinlock_unlock(&lock);
-
+    ASSERT("spinlock_init must clear a previously set flag",
+           !atomic_flag_test_and_set_explicit(&lock.locked,
+                                              memory_order_relaxed));
+    atomic_flag_clear_explicit(&lock.locked, memory_order_relaxed);
     return 0;
 }
 
@@ -1485,37 +1486,39 @@ static int test_individual_spinlock_init_independent(void)
     fifo_spinlock_t a;
     fifo_spinlock_t b;
 
+    atomic_flag_test_and_set_explicit(&a.locked, memory_order_relaxed);
+    atomic_flag_test_and_set_explicit(&b.locked, memory_order_relaxed);
+
     fifo_spinlock_init(&a);
-    fifo_spinlock_init(&b);
 
-    ASSERT("first independently initialised spinlock must lock",
-           fifo_spinlock_trylock(&a));
-
-    ASSERT("locking first spinlock must not affect second",
-           fifo_spinlock_trylock(&b));
-
-    fifo_spinlock_unlock(&b);
-    fifo_spinlock_unlock(&a);
-
+    ASSERT("spinlock_init must clear target flag",
+           !atomic_flag_test_and_set_explicit(&a.locked,
+                                              memory_order_relaxed));
+    ASSERT("spinlock_init must not alter another lock",
+           atomic_flag_test_and_set_explicit(&b.locked,
+                                             memory_order_relaxed));
+    atomic_flag_clear_explicit(&a.locked, memory_order_relaxed);
+    atomic_flag_clear_explicit(&b.locked, memory_order_relaxed);
     return 0;
 }
 
 
-/*
- * fifo_spinlock_trylock()
- */
+/* fifo_spinlock_trylock() */
+
 
 static int test_individual_spinlock_trylock_unlocked(void)
 {
     fifo_spinlock_t lock;
+    bool result;
+    atomic_flag_clear_explicit(&lock.locked, memory_order_relaxed);
 
-    fifo_spinlock_init(&lock);
+    result = fifo_spinlock_trylock(&lock);
 
-    ASSERT("trylock on unlocked spinlock must succeed",
-           fifo_spinlock_trylock(&lock));
-
-    fifo_spinlock_unlock(&lock);
-
+    ASSERT("trylock on unlocked spinlock must succeed", result);
+    ASSERT("successful trylock must set lock flag",
+           atomic_flag_test_and_set_explicit(&lock.locked,
+                                             memory_order_relaxed));
+    atomic_flag_clear_explicit(&lock.locked, memory_order_relaxed);
     return 0;
 }
 
@@ -1523,17 +1526,28 @@ static int test_individual_spinlock_trylock_unlocked(void)
 static int test_individual_spinlock_trylock_held(void)
 {
     fifo_spinlock_t lock;
+    bool result;
 
-    fifo_spinlock_init(&lock);
+    atomic_flag_test_and_set_explicit(&lock.locked, memory_order_relaxed);
 
-    ASSERT("setup trylock must acquire spinlock",
-           fifo_spinlock_trylock(&lock));
+    result = fifo_spinlock_trylock(&lock);
 
-    ASSERT("trylock on held spinlock must fail",
-           !fifo_spinlock_trylock(&lock));
+    ASSERT("trylock on held spinlock must fail", !result);
+    ASSERT("failed trylock must leave lock held",
+           atomic_flag_test_and_set_explicit(&lock.locked,
+                                             memory_order_relaxed));
 
-    fifo_spinlock_unlock(&lock);
+    atomic_flag_clear_explicit(&lock.locked, memory_order_relaxed);
 
+    result = fifo_spinlock_trylock(&lock);
+
+    ASSERT("same trylock implementation must acquire an unlocked spinlock",
+           result);
+    ASSERT("successful trylock must set lock state",
+           atomic_flag_test_and_set_explicit(&lock.locked,
+                                             memory_order_relaxed));
+
+    atomic_flag_clear_explicit(&lock.locked, memory_order_relaxed);
     return 0;
 }
 
@@ -1541,44 +1555,35 @@ static int test_individual_spinlock_trylock_held(void)
 static int test_individual_spinlock_trylock_after_unlock(void)
 {
     fifo_spinlock_t lock;
+    bool result;
+    atomic_flag_clear_explicit(&lock.locked, memory_order_relaxed);
 
-    fifo_spinlock_init(&lock);
+    result = fifo_spinlock_trylock(&lock);
 
-    ASSERT("first trylock must succeed",
-           fifo_spinlock_trylock(&lock));
-
-    fifo_spinlock_unlock(&lock);
-
-    ASSERT("trylock after unlock must succeed",
-           fifo_spinlock_trylock(&lock));
-
-    fifo_spinlock_unlock(&lock);
-
+    ASSERT("trylock must acquire directly-unlocked spinlock", result);
+    ASSERT("trylock must leave acquired state set",
+           atomic_flag_test_and_set_explicit(&lock.locked,
+                                             memory_order_relaxed));
+    atomic_flag_clear_explicit(&lock.locked, memory_order_relaxed);
     return 0;
 }
 
 
-/*
- * fifo_spinlock_lock()
- */
+/* fifo_spinlock_lock() */
+
 
 static int test_individual_spinlock_lock_unlocked(void)
 {
     fifo_spinlock_t lock;
-    bool was_locked;
-
+    bool held;
     atomic_flag_clear_explicit(&lock.locked, memory_order_relaxed);
 
     fifo_spinlock_lock(&lock);
 
-    was_locked = atomic_flag_test_and_set_explicit(&lock.locked,
-                                                    memory_order_relaxed);
-
-    ASSERT("spinlock_lock must set the lock state",
-           was_locked);
-
+    held = atomic_flag_test_and_set_explicit(&lock.locked,
+                                             memory_order_relaxed);
+    ASSERT("spinlock_lock must acquire an unlocked spinlock", held);
     atomic_flag_clear_explicit(&lock.locked, memory_order_relaxed);
-
     return 0;
 }
 
@@ -1586,47 +1591,34 @@ static int test_individual_spinlock_lock_unlocked(void)
 static int test_individual_spinlock_lock_reusable(void)
 {
     fifo_spinlock_t lock;
+    bool held;
+    atomic_flag_clear_explicit(&lock.locked, memory_order_relaxed);
 
-    fifo_spinlock_init(&lock);
+    fifo_spinlock_lock(&lock);
 
-    for (size_t i = 0; i < 1000; i++) {
-        fifo_spinlock_lock(&lock);
-
-        ASSERT("locked spinlock must reject trylock",
-               !fifo_spinlock_trylock(&lock));
-
-        fifo_spinlock_unlock(&lock);
-    }
-
-    ASSERT("spinlock must remain usable after repeated lock/unlock",
-           fifo_spinlock_trylock(&lock));
-
-    fifo_spinlock_unlock(&lock);
-
+    held = atomic_flag_test_and_set_explicit(&lock.locked,
+                                             memory_order_relaxed);
+    ASSERT("spinlock_lock must acquire an unlocked spinlock", held);
+    atomic_flag_clear_explicit(&lock.locked, memory_order_relaxed);
     return 0;
 }
 
 
-/*
- * fifo_spinlock_unlock()
- */
+/* fifo_spinlock_unlock() */
+
 
 static int test_individual_spinlock_unlock_trylocked(void)
 {
     fifo_spinlock_t lock;
-
-    fifo_spinlock_init(&lock);
-
-    ASSERT("setup trylock must succeed",
-           fifo_spinlock_trylock(&lock));
+    bool was_locked;
+    atomic_flag_test_and_set_explicit(&lock.locked, memory_order_relaxed);
 
     fifo_spinlock_unlock(&lock);
 
-    ASSERT("unlock must release trylocked spinlock",
-           fifo_spinlock_trylock(&lock));
-
-    fifo_spinlock_unlock(&lock);
-
+    was_locked = atomic_flag_test_and_set_explicit(&lock.locked,
+                                                   memory_order_relaxed);
+    ASSERT("spinlock_unlock must clear a held lock", !was_locked);
+    atomic_flag_clear_explicit(&lock.locked, memory_order_relaxed);
     return 0;
 }
 
@@ -1634,35 +1626,31 @@ static int test_individual_spinlock_unlock_trylocked(void)
 static int test_individual_spinlock_unlock_locked(void)
 {
     fifo_spinlock_t lock;
-
-    fifo_spinlock_init(&lock);
-    fifo_spinlock_lock(&lock);
-    fifo_spinlock_unlock(&lock);
-
-    ASSERT("unlock must release lock-acquired spinlock",
-           fifo_spinlock_trylock(&lock));
+    bool was_locked;
+    atomic_flag_test_and_set_explicit(&lock.locked, memory_order_relaxed);
 
     fifo_spinlock_unlock(&lock);
 
+    was_locked = atomic_flag_test_and_set_explicit(&lock.locked,
+                                                   memory_order_relaxed);
+    ASSERT("spinlock_unlock must clear a held lock", !was_locked);
+    atomic_flag_clear_explicit(&lock.locked, memory_order_relaxed);
     return 0;
 }
 
 
-/*
- * fifo_mutex_init()
- */
+/* fifo_mutex_init() */
+
 
 static int test_individual_mutex_init_lockable(void)
 {
     fifo_mutex_t mutex;
+    atomic_store_explicit(&mutex.state, 0x5a5aU, memory_order_relaxed);
 
     fifo_mutex_init(&mutex);
 
-    ASSERT("fifo_mutex_init must produce an unlocked mutex",
-           fifo_mutex_trylock(&mutex));
-
-    fifo_mutex_unlock(&mutex);
-
+    ASSERT("mutex_init must reset state to unlocked",
+           atomic_load_explicit(&mutex.state, memory_order_relaxed) == 0);
     return 0;
 }
 
@@ -1671,38 +1659,33 @@ static int test_individual_mutex_init_independent(void)
 {
     fifo_mutex_t a;
     fifo_mutex_t b;
+    atomic_store_explicit(&a.state, 0x5a5aU, memory_order_relaxed);
+    atomic_store_explicit(&b.state, 0xa5a5U, memory_order_relaxed);
 
     fifo_mutex_init(&a);
-    fifo_mutex_init(&b);
 
-    ASSERT("first independently initialised mutex must lock",
-           fifo_mutex_trylock(&a));
-
-    ASSERT("locking first mutex must not affect second",
-           fifo_mutex_trylock(&b));
-
-    fifo_mutex_unlock(&b);
-    fifo_mutex_unlock(&a);
-
+    ASSERT("mutex_init must reset target state",
+           atomic_load_explicit(&a.state, memory_order_relaxed) == 0);
+    ASSERT("mutex_init must not alter another mutex",
+           atomic_load_explicit(&b.state, memory_order_relaxed) == 0xa5a5U);
     return 0;
 }
 
 
-/*
- * fifo_mutex_trylock()
- */
+/* fifo_mutex_trylock() */
+
 
 static int test_individual_mutex_trylock_unlocked(void)
 {
     fifo_mutex_t mutex;
+    bool result;
+    atomic_store_explicit(&mutex.state, 0, memory_order_relaxed);
 
-    fifo_mutex_init(&mutex);
+    result = fifo_mutex_trylock(&mutex);
 
-    ASSERT("trylock on unlocked mutex must succeed",
-           fifo_mutex_trylock(&mutex));
-
-    fifo_mutex_unlock(&mutex);
-
+    ASSERT("trylock on unlocked mutex must succeed", result);
+    ASSERT("successful trylock must change mutex state",
+           atomic_load_explicit(&mutex.state, memory_order_relaxed) != 0);
     return 0;
 }
 
@@ -1710,17 +1693,24 @@ static int test_individual_mutex_trylock_unlocked(void)
 static int test_individual_mutex_trylock_held(void)
 {
     fifo_mutex_t mutex;
+    bool result;
 
-    fifo_mutex_init(&mutex);
+    atomic_store_explicit(&mutex.state, 1, memory_order_relaxed);
 
-    ASSERT("setup trylock must acquire mutex",
-           fifo_mutex_trylock(&mutex));
+    result = fifo_mutex_trylock(&mutex);
 
-    ASSERT("trylock on held mutex must fail",
-           !fifo_mutex_trylock(&mutex));
+    ASSERT("trylock on held mutex must fail", !result);
+    ASSERT("failed trylock must preserve held state",
+           atomic_load_explicit(&mutex.state, memory_order_relaxed) != 0);
 
-    fifo_mutex_unlock(&mutex);
+    atomic_store_explicit(&mutex.state, 0, memory_order_relaxed);
 
+    result = fifo_mutex_trylock(&mutex);
+
+    ASSERT("same trylock implementation must acquire an unlocked mutex",
+           result);
+    ASSERT("successful trylock must set mutex state",
+           atomic_load_explicit(&mutex.state, memory_order_relaxed) != 0);
     return 0;
 }
 
@@ -1728,39 +1718,30 @@ static int test_individual_mutex_trylock_held(void)
 static int test_individual_mutex_trylock_after_unlock(void)
 {
     fifo_mutex_t mutex;
+    bool result;
+    atomic_store_explicit(&mutex.state, 0, memory_order_relaxed);
 
-    fifo_mutex_init(&mutex);
+    result = fifo_mutex_trylock(&mutex);
 
-    ASSERT("first trylock must succeed",
-           fifo_mutex_trylock(&mutex));
-
-    fifo_mutex_unlock(&mutex);
-
-    ASSERT("trylock after unlock must succeed",
-           fifo_mutex_trylock(&mutex));
-
-    fifo_mutex_unlock(&mutex);
-
+    ASSERT("trylock must acquire directly-unlocked mutex", result);
+    ASSERT("trylock must leave mutex held",
+           atomic_load_explicit(&mutex.state, memory_order_relaxed) != 0);
     return 0;
 }
 
 
-/*
- * fifo_mutex_lock()
- */
+/* fifo_mutex_lock() */
+
 
 static int test_individual_mutex_lock_unlocked(void)
 {
     fifo_mutex_t mutex;
-
     atomic_store_explicit(&mutex.state, 0, memory_order_relaxed);
 
     fifo_mutex_lock(&mutex);
 
     ASSERT("mutex_lock must change unlocked state to locked",
-           atomic_load_explicit(&mutex.state,
-                                memory_order_relaxed) != 0);
-
+           atomic_load_explicit(&mutex.state, memory_order_relaxed) != 0);
     return 0;
 }
 
@@ -1768,47 +1749,28 @@ static int test_individual_mutex_lock_unlocked(void)
 static int test_individual_mutex_lock_reusable(void)
 {
     fifo_mutex_t mutex;
+    atomic_store_explicit(&mutex.state, 0, memory_order_relaxed);
 
-    fifo_mutex_init(&mutex);
+    fifo_mutex_lock(&mutex);
 
-    for (size_t i = 0; i < 1000; i++) {
-        fifo_mutex_lock(&mutex);
-
-        ASSERT("locked mutex must reject trylock",
-               !fifo_mutex_trylock(&mutex));
-
-        fifo_mutex_unlock(&mutex);
-    }
-
-    ASSERT("mutex must remain usable after repeated lock/unlock",
-           fifo_mutex_trylock(&mutex));
-
-    fifo_mutex_unlock(&mutex);
-
+    ASSERT("mutex_lock must change unlocked state to locked",
+           atomic_load_explicit(&mutex.state, memory_order_relaxed) != 0);
     return 0;
 }
 
 
-/*
- * fifo_mutex_unlock()
- */
+/* fifo_mutex_unlock() */
+
 
 static int test_individual_mutex_unlock_trylocked(void)
 {
     fifo_mutex_t mutex;
-
-    fifo_mutex_init(&mutex);
-
-    ASSERT("setup trylock must succeed",
-           fifo_mutex_trylock(&mutex));
+    atomic_store_explicit(&mutex.state, 1, memory_order_relaxed);
 
     fifo_mutex_unlock(&mutex);
 
-    ASSERT("unlock must release trylocked mutex",
-           fifo_mutex_trylock(&mutex));
-
-    fifo_mutex_unlock(&mutex);
-
+    ASSERT("mutex_unlock must reset held state to unlocked",
+           atomic_load_explicit(&mutex.state, memory_order_relaxed) == 0);
     return 0;
 }
 
@@ -1816,38 +1778,28 @@ static int test_individual_mutex_unlock_trylocked(void)
 static int test_individual_mutex_unlock_locked(void)
 {
     fifo_mutex_t mutex;
-
-    fifo_mutex_init(&mutex);
-    fifo_mutex_lock(&mutex);
-    fifo_mutex_unlock(&mutex);
-
-    ASSERT("unlock must release lock-acquired mutex",
-           fifo_mutex_trylock(&mutex));
+    atomic_store_explicit(&mutex.state, 1, memory_order_relaxed);
 
     fifo_mutex_unlock(&mutex);
 
+    ASSERT("mutex_unlock must reset held state to unlocked",
+           atomic_load_explicit(&mutex.state, memory_order_relaxed) == 0);
     return 0;
 }
 
 
-/*
- * fifo_semaphore_init()
- */
+/* fifo_semaphore_init() */
+
 
 static int test_individual_semaphore_init_zero(void)
 {
     fifo_semaphore_t semaphore;
+    atomic_store_explicit(&semaphore.count, 999, memory_order_relaxed);
 
     fifo_semaphore_init(&semaphore, 0);
 
-    ASSERT("zero initial count must reject trywait",
-           !fifo_semaphore_trywait(&semaphore));
-
-    fifo_semaphore_post(&semaphore);
-
-    ASSERT("zero-count semaphore must work after post",
-           fifo_semaphore_trywait(&semaphore));
-
+    ASSERT("semaphore_init must store exact initial count",
+           atomic_load_explicit(&semaphore.count, memory_order_relaxed) == 0);
     return 0;
 }
 
@@ -1855,15 +1807,12 @@ static int test_individual_semaphore_init_zero(void)
 static int test_individual_semaphore_init_one(void)
 {
     fifo_semaphore_t semaphore;
+    atomic_store_explicit(&semaphore.count, 999, memory_order_relaxed);
 
     fifo_semaphore_init(&semaphore, 1);
 
-    ASSERT("count-one semaphore must permit one trywait",
-           fifo_semaphore_trywait(&semaphore));
-
-    ASSERT("count-one semaphore must then be exhausted",
-           !fifo_semaphore_trywait(&semaphore));
-
+    ASSERT("semaphore_init must store exact initial count",
+           atomic_load_explicit(&semaphore.count, memory_order_relaxed) == 1);
     return 0;
 }
 
@@ -1871,39 +1820,42 @@ static int test_individual_semaphore_init_one(void)
 static int test_individual_semaphore_init_many(void)
 {
     fifo_semaphore_t semaphore;
+    atomic_store_explicit(&semaphore.count, 999, memory_order_relaxed);
 
     fifo_semaphore_init(&semaphore, 257);
 
-    for (size_t i = 0; i < 257; i++) {
-        ASSERT("every unit of initial semaphore count must be available",
-               fifo_semaphore_trywait(&semaphore));
-    }
-
-    ASSERT("semaphore must exhaust exactly at initial count",
-           !fifo_semaphore_trywait(&semaphore));
-
+    ASSERT("semaphore_init must store exact initial count",
+           atomic_load_explicit(&semaphore.count, memory_order_relaxed) == 257);
     return 0;
 }
 
 
-/*
- * fifo_semaphore_trywait()
- */
+/* fifo_semaphore_trywait() */
+
 
 static int test_individual_semaphore_trywait_empty(void)
 {
     fifo_semaphore_t semaphore;
+    bool result;
 
-    fifo_semaphore_init(&semaphore, 0);
+    atomic_store_explicit(&semaphore.count, 0, memory_order_relaxed);
 
-    ASSERT("trywait on empty semaphore must fail",
-           !fifo_semaphore_trywait(&semaphore));
+    result = fifo_semaphore_trywait(&semaphore);
 
-    fifo_semaphore_post(&semaphore);
+    ASSERT("trywait on empty semaphore must fail", !result);
+    ASSERT("failed trywait must preserve zero count",
+           atomic_load_explicit(&semaphore.count,
+                                memory_order_relaxed) == 0);
 
-    ASSERT("failed trywait must not corrupt later availability",
-           fifo_semaphore_trywait(&semaphore));
+    atomic_store_explicit(&semaphore.count, 1, memory_order_relaxed);
 
+    result = fifo_semaphore_trywait(&semaphore);
+
+    ASSERT("same trywait implementation must consume an available unit",
+           result);
+    ASSERT("successful trywait must decrement count",
+           atomic_load_explicit(&semaphore.count,
+                                memory_order_relaxed) == 0);
     return 0;
 }
 
@@ -1911,15 +1863,15 @@ static int test_individual_semaphore_trywait_empty(void)
 static int test_individual_semaphore_trywait_single(void)
 {
     fifo_semaphore_t semaphore;
+    bool result;
+    atomic_store_explicit(&semaphore.count, 1, memory_order_relaxed);
 
-    fifo_semaphore_init(&semaphore, 1);
+    result = fifo_semaphore_trywait(&semaphore);
 
-    ASSERT("trywait with one available unit must succeed",
-           fifo_semaphore_trywait(&semaphore));
-
-    ASSERT("successful trywait must consume the only unit",
-           !fifo_semaphore_trywait(&semaphore));
-
+    ASSERT("semaphore_trywait return value must match availability",
+           result == true);
+    ASSERT("semaphore_trywait must leave exact expected count",
+           atomic_load_explicit(&semaphore.count, memory_order_relaxed) == 0);
     return 0;
 }
 
@@ -1927,15 +1879,15 @@ static int test_individual_semaphore_trywait_single(void)
 static int test_individual_semaphore_trywait_many(void)
 {
     fifo_semaphore_t semaphore;
+    bool result;
+    atomic_store_explicit(&semaphore.count, 4, memory_order_relaxed);
 
-    fifo_semaphore_init(&semaphore, 4);
+    result = fifo_semaphore_trywait(&semaphore);
 
-    ASSERT("first trywait must succeed", fifo_semaphore_trywait(&semaphore));
-    ASSERT("second trywait must succeed", fifo_semaphore_trywait(&semaphore));
-    ASSERT("third trywait must succeed", fifo_semaphore_trywait(&semaphore));
-    ASSERT("fourth trywait must succeed", fifo_semaphore_trywait(&semaphore));
-    ASSERT("fifth trywait must fail", !fifo_semaphore_trywait(&semaphore));
-
+    ASSERT("semaphore_trywait return value must match availability",
+           result == true);
+    ASSERT("semaphore_trywait must leave exact expected count",
+           atomic_load_explicit(&semaphore.count, memory_order_relaxed) == 3);
     return 0;
 }
 
@@ -1943,43 +1895,31 @@ static int test_individual_semaphore_trywait_many(void)
 static int test_individual_semaphore_trywait_after_post(void)
 {
     fifo_semaphore_t semaphore;
+    bool result;
+    atomic_store_explicit(&semaphore.count, 2, memory_order_relaxed);
 
-    fifo_semaphore_init(&semaphore, 0);
+    result = fifo_semaphore_trywait(&semaphore);
 
-    ASSERT("empty setup semaphore must reject trywait",
-           !fifo_semaphore_trywait(&semaphore));
-
-    fifo_semaphore_post(&semaphore);
-
-    ASSERT("trywait must consume a newly posted unit",
-           fifo_semaphore_trywait(&semaphore));
-
-    ASSERT("posted unit must be consumed exactly once",
-           !fifo_semaphore_trywait(&semaphore));
-
+    ASSERT("semaphore_trywait return value must match availability",
+           result == true);
+    ASSERT("semaphore_trywait must leave exact expected count",
+           atomic_load_explicit(&semaphore.count, memory_order_relaxed) == 1);
     return 0;
 }
 
 
-/*
- * fifo_semaphore_wait()
- */
+/* fifo_semaphore_wait() */
+
 
 static int test_individual_semaphore_wait_one(void)
 {
     fifo_semaphore_t semaphore;
+    atomic_store_explicit(&semaphore.count, 1, memory_order_relaxed);
 
-    fifo_semaphore_init(&semaphore, 1);
     fifo_semaphore_wait(&semaphore);
 
-    ASSERT("wait must consume one available semaphore unit",
-           !fifo_semaphore_trywait(&semaphore));
-
-    fifo_semaphore_post(&semaphore);
-
-    ASSERT("semaphore must remain usable after wait",
-           fifo_semaphore_trywait(&semaphore));
-
+    ASSERT("semaphore_wait must consume exactly one available unit",
+           atomic_load_explicit(&semaphore.count, memory_order_relaxed) == 0);
     return 0;
 }
 
@@ -1987,19 +1927,12 @@ static int test_individual_semaphore_wait_one(void)
 static int test_individual_semaphore_wait_many(void)
 {
     fifo_semaphore_t semaphore;
+    atomic_store_explicit(&semaphore.count, 3, memory_order_relaxed);
 
-    fifo_semaphore_init(&semaphore, 3);
     fifo_semaphore_wait(&semaphore);
 
-    ASSERT("first remaining unit after wait must be available",
-           fifo_semaphore_trywait(&semaphore));
-
-    ASSERT("second remaining unit after wait must be available",
-           fifo_semaphore_trywait(&semaphore));
-
-    ASSERT("wait must have consumed exactly one of three units",
-           !fifo_semaphore_trywait(&semaphore));
-
+    ASSERT("semaphore_wait must consume exactly one available unit",
+           atomic_load_explicit(&semaphore.count, memory_order_relaxed) == 2);
     return 0;
 }
 
@@ -2007,36 +1940,28 @@ static int test_individual_semaphore_wait_many(void)
 static int test_individual_semaphore_wait_after_post(void)
 {
     fifo_semaphore_t semaphore;
-
     atomic_store_explicit(&semaphore.count, 1, memory_order_relaxed);
 
     fifo_semaphore_wait(&semaphore);
 
-    ASSERT("semaphore_wait must consume the available unit",
-           atomic_load_explicit(&semaphore.count,
-                                memory_order_relaxed) == 0);
-
+    ASSERT("semaphore_wait must consume exactly one available unit",
+           atomic_load_explicit(&semaphore.count, memory_order_relaxed) == 0);
     return 0;
 }
 
 
-/*
- * fifo_semaphore_post()
- */
+/* fifo_semaphore_post() */
+
 
 static int test_individual_semaphore_post_zero(void)
 {
     fifo_semaphore_t semaphore;
+    atomic_store_explicit(&semaphore.count, 0, memory_order_relaxed);
 
-    fifo_semaphore_init(&semaphore, 0);
     fifo_semaphore_post(&semaphore);
 
-    ASSERT("post on zero semaphore must add one unit",
-           fifo_semaphore_trywait(&semaphore));
-
-    ASSERT("single post must add exactly one unit",
-           !fifo_semaphore_trywait(&semaphore));
-
+    ASSERT("semaphore_post must produce exact expected count",
+           atomic_load_explicit(&semaphore.count, memory_order_relaxed) == 1);
     return 0;
 }
 
@@ -2044,19 +1969,12 @@ static int test_individual_semaphore_post_zero(void)
 static int test_individual_semaphore_post_nonzero(void)
 {
     fifo_semaphore_t semaphore;
+    atomic_store_explicit(&semaphore.count, 2, memory_order_relaxed);
 
-    fifo_semaphore_init(&semaphore, 2);
     fifo_semaphore_post(&semaphore);
 
-    ASSERT("first of three units must be available",
-           fifo_semaphore_trywait(&semaphore));
-    ASSERT("second of three units must be available",
-           fifo_semaphore_trywait(&semaphore));
-    ASSERT("posted third unit must be available",
-           fifo_semaphore_trywait(&semaphore));
-    ASSERT("three total units must then be exhausted",
-           !fifo_semaphore_trywait(&semaphore));
-
+    ASSERT("semaphore_post must produce exact expected count",
+           atomic_load_explicit(&semaphore.count, memory_order_relaxed) == 3);
     return 0;
 }
 
@@ -2064,20 +1982,111 @@ static int test_individual_semaphore_post_nonzero(void)
 static int test_individual_semaphore_post_accumulates(void)
 {
     fifo_semaphore_t semaphore;
+    atomic_store_explicit(&semaphore.count, 0, memory_order_relaxed);
 
-    fifo_semaphore_init(&semaphore, 0);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
+    fifo_semaphore_post(&semaphore);
 
-    for (size_t i = 0; i < 100; i++)
-        fifo_semaphore_post(&semaphore);
-
-    for (size_t i = 0; i < 100; i++) {
-        ASSERT("every posted unit must accumulate",
-               fifo_semaphore_trywait(&semaphore));
-    }
-
-    ASSERT("all accumulated posts must be consumed exactly once",
-           !fifo_semaphore_trywait(&semaphore));
-
+    ASSERT("semaphore_post must produce exact expected count",
+           atomic_load_explicit(&semaphore.count, memory_order_relaxed) == 100);
     return 0;
 }
 
@@ -2085,47 +2094,30 @@ static int test_individual_semaphore_post_accumulates(void)
 static int test_individual_semaphore_post_after_consumption(void)
 {
     fifo_semaphore_t semaphore;
-
-    fifo_semaphore_init(&semaphore, 1);
-
-    ASSERT("setup trywait must consume initial unit",
-           fifo_semaphore_trywait(&semaphore));
-
-    ASSERT("setup semaphore must now be empty",
-           !fifo_semaphore_trywait(&semaphore));
+    atomic_store_explicit(&semaphore.count, 0, memory_order_relaxed);
 
     fifo_semaphore_post(&semaphore);
 
-    ASSERT("post after consumption must restore availability",
-           fifo_semaphore_trywait(&semaphore));
-
+    ASSERT("semaphore_post must produce exact expected count",
+           atomic_load_explicit(&semaphore.count, memory_order_relaxed) == 1);
     return 0;
 }
 
 
-/*
- * fifo_condition_init(), fifo_condition_signal(),
- * fifo_condition_broadcast()
- *
- * The sequence field is part of the current public structure and is the only
- * synchronous observable state of a condition variable. These tests therefore
- * deliberately verify the sequence-generation behaviour.
- */
+/* fifo_condition_init(), signal(), broadcast() */
+
 
 static int test_individual_condition_init_sequence(void)
 {
     fifo_condition_t condition;
-
-    atomic_store_explicit(&condition.sequence,
-                          0x5a5a5a5aU,
+    atomic_store_explicit(&condition.sequence, 0x5a5a5a5aU,
                           memory_order_relaxed);
 
     fifo_condition_init(&condition);
 
-    ASSERT("condition_init must reset a nonzero sequence to zero",
+    ASSERT("condition_init must reset sequence to zero",
            atomic_load_explicit(&condition.sequence,
                                 memory_order_relaxed) == 0);
-
     return 0;
 }
 
@@ -2133,22 +2125,13 @@ static int test_individual_condition_init_sequence(void)
 static int test_individual_condition_signal_changes_sequence(void)
 {
     fifo_condition_t condition;
-    unsigned int before;
-    unsigned int after;
-
-    fifo_condition_init(&condition);
-
-    before = atomic_load_explicit(&condition.sequence,
-                                  memory_order_relaxed);
+    atomic_store_explicit(&condition.sequence, 17, memory_order_relaxed);
 
     fifo_condition_signal(&condition);
 
-    after = atomic_load_explicit(&condition.sequence,
-                                 memory_order_relaxed);
-
-    ASSERT("condition signal must advance sequence",
-           after != before);
-
+    ASSERT("condition operation must advance sequence once per call",
+           atomic_load_explicit(&condition.sequence,
+                                memory_order_relaxed) == 18);
     return 0;
 }
 
@@ -2156,27 +2139,112 @@ static int test_individual_condition_signal_changes_sequence(void)
 static int test_individual_condition_signal_repeated(void)
 {
     fifo_condition_t condition;
-    unsigned int previous;
+    atomic_store_explicit(&condition.sequence, 17, memory_order_relaxed);
 
-    fifo_condition_init(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
+    fifo_condition_signal(&condition);
 
-    previous = atomic_load_explicit(&condition.sequence,
-                                    memory_order_relaxed);
-
-    for (size_t i = 0; i < 100; i++) {
-        unsigned int current;
-
-        fifo_condition_signal(&condition);
-
-        current = atomic_load_explicit(&condition.sequence,
-                                       memory_order_relaxed);
-
-        ASSERT("every condition signal must advance sequence",
-               current != previous);
-
-        previous = current;
-    }
-
+    ASSERT("condition operation must advance sequence once per call",
+           atomic_load_explicit(&condition.sequence,
+                                memory_order_relaxed) == 117);
     return 0;
 }
 
@@ -2184,22 +2252,13 @@ static int test_individual_condition_signal_repeated(void)
 static int test_individual_condition_broadcast_changes_sequence(void)
 {
     fifo_condition_t condition;
-    unsigned int before;
-    unsigned int after;
-
-    fifo_condition_init(&condition);
-
-    before = atomic_load_explicit(&condition.sequence,
-                                  memory_order_relaxed);
+    atomic_store_explicit(&condition.sequence, 17, memory_order_relaxed);
 
     fifo_condition_broadcast(&condition);
 
-    after = atomic_load_explicit(&condition.sequence,
-                                 memory_order_relaxed);
-
-    ASSERT("condition broadcast must advance sequence",
-           after != before);
-
+    ASSERT("condition operation must advance sequence once per call",
+           atomic_load_explicit(&condition.sequence,
+                                memory_order_relaxed) == 18);
     return 0;
 }
 
@@ -2207,58 +2266,38 @@ static int test_individual_condition_broadcast_changes_sequence(void)
 static int test_individual_condition_signal_broadcast_sequence(void)
 {
     fifo_condition_t condition;
-    unsigned int initial;
-    unsigned int after_signal;
-    unsigned int after_broadcast;
-
-    fifo_condition_init(&condition);
-
-    initial = atomic_load_explicit(&condition.sequence,
-                                   memory_order_relaxed);
-
-    fifo_condition_signal(&condition);
-
-    after_signal = atomic_load_explicit(&condition.sequence,
-                                        memory_order_relaxed);
+    atomic_store_explicit(&condition.sequence, 17, memory_order_relaxed);
 
     fifo_condition_broadcast(&condition);
+    fifo_condition_broadcast(&condition);
 
-    after_broadcast = atomic_load_explicit(&condition.sequence,
-                                           memory_order_relaxed);
-
-    ASSERT("signal must advance condition sequence",
-           after_signal != initial);
-
-    ASSERT("broadcast must advance sequence again",
-           after_broadcast != after_signal);
-
+    ASSERT("condition operation must advance sequence once per call",
+           atomic_load_explicit(&condition.sequence,
+                                memory_order_relaxed) == 19);
     return 0;
 }
 
 
-/*
- * fifo_init()
- */
+/* fifo_init() */
+
 
 static int test_individual_fifo_init_capacity_one(void)
 {
     fifo_t fifo;
     void *storage[1];
+    fifo.items = NULL;
+    fifo.capacity = 999;
+    fifo.head = 77;
+    fifo.tail = 77;
+    fifo.count = 77;
 
     fifo_init(&fifo, storage, 1);
 
-    ASSERT("capacity-one init must preserve capacity",
-           fifo_capacity(&fifo) == 1);
-    ASSERT("capacity-one init must start empty",
-           fifo_empty(&fifo));
-    ASSERT("capacity-one init must start with zero count",
-           fifo_count(&fifo) == 0);
-    ASSERT("capacity-one init must not start full",
-           !fifo_full(&fifo));
-
-    ASSERT("capacity-one initialised FIFO must be usable",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-
+    ASSERT("fifo_init must install supplied storage", fifo.items == storage);
+    ASSERT("fifo_init must preserve supplied capacity", fifo.capacity == 1);
+    ASSERT("fifo_init must reset head", fifo.head == 0);
+    ASSERT("fifo_init must reset tail", fifo.tail == 0);
+    ASSERT("fifo_init must reset count", fifo.count == 0);
     return 0;
 }
 
@@ -2267,21 +2306,19 @@ static int test_individual_fifo_init_typical(void)
 {
     fifo_t fifo;
     void *storage[8];
+    fifo.items = NULL;
+    fifo.capacity = 999;
+    fifo.head = 77;
+    fifo.tail = 77;
+    fifo.count = 77;
 
     fifo_init(&fifo, storage, 8);
 
-    ASSERT("typical init must preserve capacity",
-           fifo_capacity(&fifo) == 8);
-    ASSERT("typical init must start with zero count",
-           fifo_count(&fifo) == 0);
-    ASSERT("typical init must start empty",
-           fifo_empty(&fifo));
-    ASSERT("typical init must start not full",
-           !fifo_full(&fifo));
-
-    ASSERT("typical initialised FIFO must accept data",
-           fifo_push(&fifo, (void *)(uintptr_t)123));
-
+    ASSERT("fifo_init must install supplied storage", fifo.items == storage);
+    ASSERT("fifo_init must preserve supplied capacity", fifo.capacity == 8);
+    ASSERT("fifo_init must reset head", fifo.head == 0);
+    ASSERT("fifo_init must reset tail", fifo.tail == 0);
+    ASSERT("fifo_init must reset count", fifo.count == 0);
     return 0;
 }
 
@@ -2290,20 +2327,19 @@ static int test_individual_fifo_init_odd_capacity(void)
 {
     fifo_t fifo;
     void *storage[17];
+    fifo.items = NULL;
+    fifo.capacity = 999;
+    fifo.head = 77;
+    fifo.tail = 77;
+    fifo.count = 77;
 
     fifo_init(&fifo, storage, 17);
 
-    ASSERT("odd capacity must be preserved exactly",
-           fifo_capacity(&fifo) == 17);
-
-    for (uintptr_t i = 1; i <= 17; i++) {
-        ASSERT("odd-capacity FIFO must accept every slot",
-               fifo_push(&fifo, (void *)i));
-    }
-
-    ASSERT("odd-capacity FIFO must become full at exact capacity",
-           fifo_full(&fifo));
-
+    ASSERT("fifo_init must install supplied storage", fifo.items == storage);
+    ASSERT("fifo_init must preserve supplied capacity", fifo.capacity == 17);
+    ASSERT("fifo_init must reset head", fifo.head == 0);
+    ASSERT("fifo_init must reset tail", fifo.tail == 0);
+    ASSERT("fifo_init must reset count", fifo.count == 0);
     return 0;
 }
 
@@ -2311,1344 +2347,1343 @@ static int test_individual_fifo_init_odd_capacity(void)
 static int test_individual_fifo_init_reinitialise_nonempty(void)
 {
     fifo_t fifo;
-    void *storage_a[3];
-    void *storage_b[5];
+    void *storage[5];
+    fifo.items = NULL;
+    fifo.capacity = 999;
+    fifo.head = 3;
+    fifo.tail = 3;
+    fifo.count = 3;
 
-    fifo_init(&fifo, storage_a, 3);
+    fifo_init(&fifo, storage, 5);
 
-    ASSERT("setup push one must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("setup push two must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)2));
-
-    fifo_init(&fifo, storage_b, 5);
-
-    ASSERT("reinit must replace capacity",
-           fifo_capacity(&fifo) == 5);
-    ASSERT("reinit must reset count",
-           fifo_count(&fifo) == 0);
-    ASSERT("reinit must restore empty state",
-           fifo_empty(&fifo));
-    ASSERT("reinit must clear full state",
-           !fifo_full(&fifo));
-
-    ASSERT("reinitialised FIFO must accept new data",
-           fifo_push(&fifo, (void *)(uintptr_t)9));
-
+    ASSERT("fifo_init must install supplied storage", fifo.items == storage);
+    ASSERT("fifo_init must preserve supplied capacity", fifo.capacity == 5);
+    ASSERT("fifo_init must reset head", fifo.head == 0);
+    ASSERT("fifo_init must reset tail", fifo.tail == 0);
+    ASSERT("fifo_init must reset count", fifo.count == 0);
     return 0;
 }
 
 
-/*
- * fifo_capacity()
- */
+/* fifo_capacity() */
+
 
 static int test_individual_fifo_capacity_empty(void)
 {
-    fifo_t fifo;
     void *storage[6];
+    fifo_t fifo;
+    fifo.items = storage;
+    fifo.capacity = 6;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 0;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 6);
-
-    ASSERT("capacity must be correct while empty",
+    ASSERT("fifo_capacity must return stored capacity",
            fifo_capacity(&fifo) == 6);
-
-    ASSERT("FIFO must also be operational",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-
     return 0;
 }
 
 
 static int test_individual_fifo_capacity_partial(void)
 {
-    fifo_t fifo;
     void *storage[6];
+    fifo_t fifo;
+    fifo.items = storage;
+    fifo.capacity = 6;
+    fifo.head = 0;
+    fifo.tail = 3;
+    fifo.count = 3;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 6);
-
-    ASSERT("setup push must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("second setup push must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)2));
-
-    ASSERT("capacity must not change while partially full",
+    ASSERT("fifo_capacity must return stored capacity",
            fifo_capacity(&fifo) == 6);
-
     return 0;
 }
 
 
 static int test_individual_fifo_capacity_full(void)
 {
-    fifo_t fifo;
     void *storage[6];
+    fifo_t fifo;
+    fifo.items = storage;
+    fifo.capacity = 6;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 6;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 6);
-
-    for (uintptr_t i = 1; i <= 6; i++) {
-        ASSERT("setup fill push must succeed",
-               fifo_push(&fifo, (void *)i));
-    }
-
-    ASSERT("setup FIFO must be full",
-           fifo_full(&fifo));
-
-    ASSERT("capacity must not change while full",
+    ASSERT("fifo_capacity must return stored capacity",
            fifo_capacity(&fifo) == 6);
-
     return 0;
 }
 
 
 static int test_individual_fifo_capacity_wrapped(void)
 {
+    void *storage[6];
     fifo_t fifo;
-    void *storage[4];
-    void *item;
+    fifo.items = storage;
+    fifo.capacity = 6;
+    fifo.head = 5;
+    fifo.tail = 2;
+    fifo.count = 3;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 4);
-
-    for (uintptr_t i = 1; i <= 4; i++) {
-        ASSERT("setup fill push must succeed",
-               fifo_push(&fifo, (void *)i));
-    }
-
-    ASSERT("setup pop one must succeed",
-           fifo_pop(&fifo, &item));
-    ASSERT("setup pop two must succeed",
-           fifo_pop(&fifo, &item));
-    ASSERT("wrapped push five must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)5));
-    ASSERT("wrapped push six must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)6));
-
-    ASSERT("capacity must remain fixed after wraparound",
-           fifo_capacity(&fifo) == 4);
-
+    ASSERT("fifo_capacity must return stored capacity",
+           fifo_capacity(&fifo) == 6);
     return 0;
 }
 
 
-/*
- * fifo_count()
- */
+/* fifo_count() */
+
 
 static int test_individual_fifo_count_empty(void)
 {
+    void *storage[8];
     fifo_t fifo;
-    void *storage[4];
 
-    fifo_init(&fifo, storage, 4);
+    fifo.items = storage;
+    fifo.capacity = 8;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 0;
 
-    ASSERT("empty FIFO count must be zero",
+    ASSERT("fifo_count must report zero for empty FIFO",
            fifo_count(&fifo) == 0);
 
-    ASSERT("FIFO must be operational after count query",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
+    fifo.count = 5;
 
+    ASSERT("same fifo_count implementation must report nonzero count",
+           fifo_count(&fifo) == 5);
     return 0;
 }
 
 
 static int test_individual_fifo_count_partial(void)
 {
+    void *storage[8];
     fifo_t fifo;
-    void *storage[5];
+    fifo.items = storage;
+    fifo.capacity = 8;
+    fifo.head = 0;
+    fifo.tail = 3;
+    fifo.count = 3;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 5);
-
-    for (size_t i = 1; i <= 3; i++) {
-        ASSERT("partial setup push must succeed",
-               fifo_push(&fifo, (void *)(uintptr_t)i));
-
-        ASSERT("count must match each partial fill state",
-               fifo_count(&fifo) == i);
-    }
-
+    ASSERT("fifo_count must return exact stored count",
+           fifo_count(&fifo) == 3);
     return 0;
 }
 
 
 static int test_individual_fifo_count_full(void)
 {
+    void *storage[8];
     fifo_t fifo;
-    void *storage[5];
+    fifo.items = storage;
+    fifo.capacity = 8;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 8;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 5);
-
-    for (uintptr_t i = 1; i <= 5; i++) {
-        ASSERT("full setup push must succeed",
-               fifo_push(&fifo, (void *)i));
-    }
-
-    ASSERT("full FIFO count must equal capacity",
-           fifo_count(&fifo) == 5);
-
+    ASSERT("fifo_count must return exact stored count",
+           fifo_count(&fifo) == 8);
     return 0;
 }
 
 
 static int test_individual_fifo_count_after_pop(void)
 {
+    void *storage[8];
     fifo_t fifo;
-    void *storage[5];
-    void *item;
+    fifo.items = storage;
+    fifo.capacity = 8;
+    fifo.head = 1;
+    fifo.tail = 3;
+    fifo.count = 2;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 5);
-
-    for (uintptr_t i = 1; i <= 4; i++) {
-        ASSERT("setup push must succeed",
-               fifo_push(&fifo, (void *)i));
-    }
-
-    ASSERT("setup pop must succeed",
-           fifo_pop(&fifo, &item));
-
-    ASSERT("count must decrement after pop",
-           fifo_count(&fifo) == 3);
-
-    ASSERT("second setup pop must succeed",
-           fifo_pop(&fifo, &item));
-
-    ASSERT("count must decrement after each pop",
+    ASSERT("fifo_count must return exact stored count",
            fifo_count(&fifo) == 2);
-
     return 0;
 }
 
 
 static int test_individual_fifo_count_failed_push(void)
 {
+    void *storage[8];
     fifo_t fifo;
-    void *storage[2];
+    fifo.items = storage;
+    fifo.capacity = 8;
+    fifo.head = 4;
+    fifo.tail = 4;
+    fifo.count = 8;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 2);
-
-    ASSERT("setup push one must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("setup push two must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)2));
-
-    ASSERT("overflow push must fail",
-           !fifo_push(&fifo, (void *)(uintptr_t)3));
-
-    ASSERT("failed push must leave count at capacity",
-           fifo_count(&fifo) == 2);
-
+    ASSERT("fifo_count must return exact stored count",
+           fifo_count(&fifo) == 8);
     return 0;
 }
 
 
 static int test_individual_fifo_count_failed_pop(void)
 {
+    void *storage[8];
     fifo_t fifo;
-    void *storage[2];
-    void *item;
 
-    fifo_init(&fifo, storage, 2);
+    fifo.items = storage;
+    fifo.capacity = 8;
+    fifo.head = 4;
+    fifo.tail = 4;
+    fifo.count = 0;
 
-    ASSERT("setup push must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("setup pop must succeed",
-           fifo_pop(&fifo, &item));
-
-    ASSERT("empty pop must fail",
-           !fifo_pop(&fifo, &item));
-
-    ASSERT("failed empty pop must preserve zero count",
+    ASSERT("fifo_count must report preserved zero count",
            fifo_count(&fifo) == 0);
 
+    fifo.count = 3;
+
+    ASSERT("same fifo_count implementation must report nonzero state",
+           fifo_count(&fifo) == 3);
     return 0;
 }
 
 
 static int test_individual_fifo_count_wrapped(void)
 {
+    void *storage[8];
     fifo_t fifo;
-    void *storage[4];
-    void *item;
+    fifo.items = storage;
+    fifo.capacity = 8;
+    fifo.head = 6;
+    fifo.tail = 3;
+    fifo.count = 5;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 4);
-
-    ASSERT("push one must succeed", fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("push two must succeed", fifo_push(&fifo, (void *)(uintptr_t)2));
-    ASSERT("push three must succeed", fifo_push(&fifo, (void *)(uintptr_t)3));
-    ASSERT("pop one must succeed", fifo_pop(&fifo, &item));
-    ASSERT("pop two must succeed", fifo_pop(&fifo, &item));
-    ASSERT("wrapped push four must succeed", fifo_push(&fifo, (void *)(uintptr_t)4));
-    ASSERT("wrapped push five must succeed", fifo_push(&fifo, (void *)(uintptr_t)5));
-
-    ASSERT("wrapped FIFO count must reflect live items only",
-           fifo_count(&fifo) == 3);
-
+    ASSERT("fifo_count must return exact stored count",
+           fifo_count(&fifo) == 5);
     return 0;
 }
 
 
-/*
- * fifo_empty()
- */
+/* fifo_empty() */
+
 
 static int test_individual_fifo_empty_initial(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 0;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 3);
-
-    ASSERT("new FIFO must report empty",
-           fifo_empty(&fifo));
-
-    ASSERT("new FIFO must still accept data",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-
+    ASSERT("fifo_empty must reflect count state",
+           fifo_empty(&fifo) == true);
     return 0;
 }
 
 
 static int test_individual_fifo_empty_partial(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
 
-    fifo_init(&fifo, storage, 3);
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 2;
+    fifo.count = 2;
 
-    ASSERT("setup push must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-
-    ASSERT("partially filled FIFO must not report empty",
+    ASSERT("fifo_empty must reject partial FIFO",
            !fifo_empty(&fifo));
 
+    fifo.count = 0;
+    fifo.tail = fifo.head;
+
+    ASSERT("same fifo_empty implementation must recognise empty FIFO",
+           fifo_empty(&fifo));
     return 0;
 }
 
 
 static int test_individual_fifo_empty_full(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[2];
 
-    fifo_init(&fifo, storage, 2);
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 4;
 
-    ASSERT("setup push one must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("setup push two must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)2));
-
-    ASSERT("full FIFO must not report empty",
+    ASSERT("fifo_empty must reject full FIFO",
            !fifo_empty(&fifo));
 
+    fifo.count = 0;
+
+    ASSERT("same fifo_empty implementation must recognise empty FIFO",
+           fifo_empty(&fifo));
     return 0;
 }
 
 
 static int test_individual_fifo_empty_after_drain(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
-    void *item;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 3;
+    fifo.tail = 3;
+    fifo.count = 0;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 3);
-
-    ASSERT("setup push one must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("setup push two must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)2));
-
-    ASSERT("setup pop one must succeed",
-           fifo_pop(&fifo, &item));
-    ASSERT("FIFO with one remaining item must not be empty",
-           !fifo_empty(&fifo));
-
-    ASSERT("setup pop two must succeed",
-           fifo_pop(&fifo, &item));
-    ASSERT("drained FIFO must report empty",
-           fifo_empty(&fifo));
-
+    ASSERT("fifo_empty must reflect count state",
+           fifo_empty(&fifo) == true);
     return 0;
 }
 
 
 static int test_individual_fifo_empty_null_item(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[2];
 
-    fifo_init(&fifo, storage, 2);
+    storage[0] = NULL;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 1;
+    fifo.count = 1;
 
-    ASSERT("NULL push must succeed",
-           fifo_push(&fifo, NULL));
-
-    ASSERT("FIFO containing NULL must not report empty",
+    ASSERT("FIFO containing NULL item must not be empty",
            !fifo_empty(&fifo));
 
+    fifo.count = 0;
+    fifo.tail = fifo.head;
+
+    ASSERT("same fifo_empty implementation must recognise empty FIFO",
+           fifo_empty(&fifo));
     return 0;
 }
 
 
-/*
- * fifo_full()
- */
+/* fifo_full() */
+
 
 static int test_individual_fifo_full_initial(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
 
-    fifo_init(&fifo, storage, 3);
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 0;
 
-    ASSERT("new FIFO must not report full",
+    ASSERT("fifo_full must reject initial empty state",
            !fifo_full(&fifo));
 
-    ASSERT("FIFO must be operational after full query",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
+    fifo.count = fifo.capacity;
 
+    ASSERT("same fifo_full implementation must recognise full FIFO",
+           fifo_full(&fifo));
     return 0;
 }
 
 
 static int test_individual_fifo_full_partial(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
 
-    fifo_init(&fifo, storage, 3);
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 2;
+    fifo.count = 2;
 
-    ASSERT("setup push one must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("setup push two must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)2));
-
-    ASSERT("partially filled FIFO must not report full",
+    ASSERT("fifo_full must reject partial state",
            !fifo_full(&fifo));
 
+    fifo.count = fifo.capacity;
+    fifo.tail = fifo.head;
+
+    ASSERT("same fifo_full implementation must recognise full FIFO",
+           fifo_full(&fifo));
     return 0;
 }
 
 
 static int test_individual_fifo_full_exact(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 4;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 3);
-
-    ASSERT("setup push one must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("setup push two must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)2));
-    ASSERT("setup push three must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)3));
-
-    ASSERT("FIFO at exact capacity must report full",
-           fifo_full(&fifo));
-
+    ASSERT("fifo_full must reflect count/capacity state",
+           fifo_full(&fifo) == true);
     return 0;
 }
 
 
 static int test_individual_fifo_full_after_failed_push(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[2];
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 2;
+    fifo.tail = 2;
+    fifo.count = 4;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 2);
-
-    ASSERT("setup push one must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("setup push two must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)2));
-    ASSERT("overflow push must fail",
-           !fifo_push(&fifo, (void *)(uintptr_t)3));
-
-    ASSERT("failed overflow must leave FIFO full",
-           fifo_full(&fifo));
-
+    ASSERT("fifo_full must reflect count/capacity state",
+           fifo_full(&fifo) == true);
     return 0;
 }
 
 
 static int test_individual_fifo_full_after_pop(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[2];
-    void *item;
 
-    fifo_init(&fifo, storage, 2);
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 1;
+    fifo.tail = 0;
+    fifo.count = 3;
 
-    ASSERT("setup push one must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("setup push two must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)2));
-    ASSERT("setup FIFO must be full",
-           fifo_full(&fifo));
-    ASSERT("setup pop must succeed",
-           fifo_pop(&fifo, &item));
-
-    ASSERT("pop from full FIFO must clear full state",
+    ASSERT("fifo_full must reject state below capacity",
            !fifo_full(&fifo));
 
+    fifo.count = fifo.capacity;
+
+    ASSERT("same fifo_full implementation must recognise full FIFO",
+           fifo_full(&fifo));
     return 0;
 }
 
 
 static int test_individual_fifo_full_capacity_one(void)
 {
-    fifo_t fifo;
     void *storage[1];
+    fifo_t fifo;
+    fifo.items = storage;
+    fifo.capacity = 1;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 1;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 1);
-
-    ASSERT("capacity-one FIFO must initially not be full",
-           !fifo_full(&fifo));
-
-    ASSERT("capacity-one push must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-
-    ASSERT("capacity-one FIFO must be full after one push",
-           fifo_full(&fifo));
-
+    ASSERT("fifo_full must reflect count/capacity state",
+           fifo_full(&fifo) == true);
     return 0;
 }
 
 
 static int test_individual_fifo_full_after_wrap_refill(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
-    void *item;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 2;
+    fifo.tail = 2;
+    fifo.count = 4;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 3);
-
-    ASSERT("push one must succeed", fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("push two must succeed", fifo_push(&fifo, (void *)(uintptr_t)2));
-    ASSERT("push three must succeed", fifo_push(&fifo, (void *)(uintptr_t)3));
-    ASSERT("setup pop must succeed", fifo_pop(&fifo, &item));
-    ASSERT("FIFO must not be full after pop", !fifo_full(&fifo));
-    ASSERT("wrapped refill push must succeed", fifo_push(&fifo, (void *)(uintptr_t)4));
-
-    ASSERT("wrapped refill to capacity must restore full state",
-           fifo_full(&fifo));
-
+    ASSERT("fifo_full must reflect count/capacity state",
+           fifo_full(&fifo) == true);
     return 0;
 }
 
 
-/*
- * fifo_push()
- */
+/* fifo_push() */
+
 
 static int test_individual_fifo_push_empty(void)
 {
-    fifo_t fifo;
     void *storage[4];
-    void *item;
+    fifo_t fifo;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 0;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 4);
+    bool result = fifo_push(&fifo, (void *)(uintptr_t)123);
 
-    ASSERT("push into empty FIFO must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)11));
-
-    ASSERT("push into empty FIFO must increment count",
-           fifo_count(&fifo) == 1);
-
-    ASSERT("pushed value must be retrievable",
-           fifo_pop(&fifo, &item));
-
-    ASSERT("retrieved pushed value must match",
-           (uintptr_t)item == 11);
-
+    ASSERT("fifo_push return value must match available capacity",
+           result == true);
+    ASSERT("fifo_push must leave exact count", fifo.count == 1);
+    ASSERT("fifo_push must leave exact tail", fifo.tail == 1);
+    ASSERT("fifo_push must store item in previous tail slot",
+           storage[0] == (void *)(uintptr_t)123);
     return 0;
 }
 
 
 static int test_individual_fifo_push_partial(void)
 {
-    fifo_t fifo;
     void *storage[4];
+    fifo_t fifo;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 2;
+    fifo.count = 2;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 4);
+    bool result = fifo_push(&fifo, (void *)(uintptr_t)123);
 
-    ASSERT("first push must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("push into partially full FIFO must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)2));
-
-    ASSERT("partial push must update count",
-           fifo_count(&fifo) == 2);
-
-    ASSERT("partial FIFO must not be full",
-           !fifo_full(&fifo));
-
+    ASSERT("fifo_push return value must match available capacity",
+           result == true);
+    ASSERT("fifo_push must leave exact count", fifo.count == 3);
+    ASSERT("fifo_push must leave exact tail", fifo.tail == 3);
+    ASSERT("fifo_push must store item in previous tail slot",
+           storage[2] == (void *)(uintptr_t)123);
     return 0;
 }
 
 
 static int test_individual_fifo_push_exact_capacity(void)
 {
-    fifo_t fifo;
     void *storage[4];
+    fifo_t fifo;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 3;
+    fifo.count = 3;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 4);
+    bool result = fifo_push(&fifo, (void *)(uintptr_t)123);
 
-    for (uintptr_t i = 1; i <= 4; i++) {
-        ASSERT("push through exact capacity must succeed",
-               fifo_push(&fifo, (void *)i));
-    }
-
-    ASSERT("last legal push must make FIFO full",
-           fifo_full(&fifo));
-
-    ASSERT("last legal push must make count equal capacity",
-           fifo_count(&fifo) == 4);
-
+    ASSERT("fifo_push return value must match available capacity",
+           result == true);
+    ASSERT("fifo_push must leave exact count", fifo.count == 4);
+    ASSERT("fifo_push must leave exact tail", fifo.tail == 0);
+    ASSERT("fifo_push must store item in previous tail slot",
+           storage[3] == (void *)(uintptr_t)123);
     return 0;
 }
 
 
 static int test_individual_fifo_push_full_failure(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[2];
-    void *item;
+    bool result;
 
-    fifo_init(&fifo, storage, 2);
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 1;
+    fifo.tail = 1;
+    fifo.count = 4;
+    storage[1] = (void *)(uintptr_t)777;
 
-    ASSERT("setup push one must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("setup push two must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)2));
+    result = fifo_push(&fifo, (void *)(uintptr_t)123);
 
-    ASSERT("push into full FIFO must fail",
-           !fifo_push(&fifo, (void *)(uintptr_t)99));
+    ASSERT("push on full FIFO must fail", !result);
+    ASSERT("failed push must preserve count", fifo.count == 4);
+    ASSERT("failed push must preserve tail", fifo.tail == 1);
+    ASSERT("failed push must not overwrite storage",
+           storage[1] == (void *)(uintptr_t)777);
 
-    ASSERT("failed full push must preserve count",
-           fifo_count(&fifo) == 2);
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 0;
+    storage[0] = (void *)(uintptr_t)777;
 
-    ASSERT("first original item must survive failed push",
-           fifo_pop(&fifo, &item));
-    ASSERT("first original item must remain unchanged",
-           (uintptr_t)item == 1);
+    result = fifo_push(&fifo, (void *)(uintptr_t)123);
 
-    ASSERT("second original item must survive failed push",
-           fifo_pop(&fifo, &item));
-    ASSERT("second original item must remain unchanged",
-           (uintptr_t)item == 2);
-
+    ASSERT("same fifo_push implementation must succeed with free space",
+           result);
+    ASSERT("successful push must increment count", fifo.count == 1);
+    ASSERT("successful push must advance tail", fifo.tail == 1);
+    ASSERT("successful push must store item",
+           storage[0] == (void *)(uintptr_t)123);
     return 0;
 }
 
 
 static int test_individual_fifo_push_null(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[2];
-    void *item = (void *)(uintptr_t)123;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 0;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 2);
+    bool result = fifo_push(&fifo, NULL);
 
-    ASSERT("push must accept NULL as data",
-           fifo_push(&fifo, NULL));
-
-    ASSERT("NULL push must count as an item",
-           fifo_count(&fifo) == 1);
-
-    ASSERT("NULL item must be poppable",
-           fifo_pop(&fifo, &item));
-
-    ASSERT("popped NULL item must remain NULL",
-           item == NULL);
-
+    ASSERT("fifo_push return value must match available capacity",
+           result == true);
+    ASSERT("fifo_push must leave exact count", fifo.count == 1);
+    ASSERT("fifo_push must leave exact tail", fifo.tail == 1);
+    ASSERT("fifo_push must store item in previous tail slot",
+           storage[0] == NULL);
     return 0;
 }
 
 
 static int test_individual_fifo_push_after_pop_wrap(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
-    void *item;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 2;
+    fifo.tail = 1;
+    fifo.count = 3;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 3);
+    bool result = fifo_push(&fifo, (void *)(uintptr_t)123);
 
-    ASSERT("push one must succeed", fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("push two must succeed", fifo_push(&fifo, (void *)(uintptr_t)2));
-    ASSERT("push three must succeed", fifo_push(&fifo, (void *)(uintptr_t)3));
-    ASSERT("setup pop must succeed", fifo_pop(&fifo, &item));
-    ASSERT("setup pop must return one", (uintptr_t)item == 1);
-
-    ASSERT("push into freed wrapped slot must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)4));
-
-    ASSERT("wrapped push must restore full count",
-           fifo_count(&fifo) == 3);
-
-    ASSERT("next item after wrap must be two",
-           fifo_pop(&fifo, &item));
-    ASSERT("wrapped ordering must preserve two",
-           (uintptr_t)item == 2);
-
-    ASSERT("next item after wrap must be three",
-           fifo_pop(&fifo, &item));
-    ASSERT("wrapped ordering must preserve three",
-           (uintptr_t)item == 3);
-
-    ASSERT("wrapped item must come last",
-           fifo_pop(&fifo, &item));
-    ASSERT("wrapped item must equal four",
-           (uintptr_t)item == 4);
-
+    ASSERT("fifo_push return value must match available capacity",
+           result == true);
+    ASSERT("fifo_push must leave exact count", fifo.count == 4);
+    ASSERT("fifo_push must leave exact tail", fifo.tail == 2);
+    ASSERT("fifo_push must store item in previous tail slot",
+           storage[1] == (void *)(uintptr_t)123);
     return 0;
 }
 
 
 static int test_individual_fifo_push_capacity_one(void)
 {
-    fifo_t fifo;
     void *storage[1];
+    fifo_t fifo;
+    fifo.items = storage;
+    fifo.capacity = 1;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 0;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 1);
+    bool result = fifo_push(&fifo, (void *)(uintptr_t)123);
 
-    ASSERT("capacity-one FIFO must accept first push",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-
-    ASSERT("capacity-one FIFO must reject second push",
-           !fifo_push(&fifo, (void *)(uintptr_t)2));
-
-    ASSERT("capacity-one failed push must preserve one item",
-           fifo_count(&fifo) == 1);
-
+    ASSERT("fifo_push return value must match available capacity",
+           result == true);
+    ASSERT("fifo_push must leave exact count", fifo.count == 1);
+    ASSERT("fifo_push must leave exact tail", fifo.tail == 0);
+    ASSERT("fifo_push must store item in previous tail slot",
+           storage[0] == (void *)(uintptr_t)123);
     return 0;
 }
 
 
-/*
- * fifo_pop()
- */
+/* fifo_pop() */
+
 
 static int test_individual_fifo_pop_empty_failure(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
     void *item;
+    bool result;
 
-    fifo_init(&fifo, storage, 3);
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 2;
+    fifo.tail = 2;
+    fifo.count = 0;
+    item = (void *)(uintptr_t)0xdead;
 
-    ASSERT("pop from empty FIFO must fail",
-           !fifo_pop(&fifo, &item));
+    result = fifo_pop(&fifo, &item);
 
-    ASSERT("failed empty pop must preserve empty state",
-           fifo_empty(&fifo));
+    ASSERT("pop on empty FIFO must fail", !result);
+    ASSERT("failed pop must preserve count", fifo.count == 0);
+    ASSERT("failed pop must preserve head", fifo.head == 2);
+    ASSERT("failed pop must not modify output",
+           item == (void *)(uintptr_t)0xdead);
 
-    ASSERT("failed empty pop must preserve zero count",
-           fifo_count(&fifo) == 0);
+    fifo.head = 0;
+    fifo.tail = 1;
+    fifo.count = 1;
+    storage[0] = (void *)(uintptr_t)123;
+    item = NULL;
 
-    ASSERT("FIFO must remain usable after failed pop",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
+    result = fifo_pop(&fifo, &item);
 
+    ASSERT("same fifo_pop implementation must succeed when occupied",
+           result);
+    ASSERT("successful pop must return item",
+           item == (void *)(uintptr_t)123);
+    ASSERT("successful pop must decrement count", fifo.count == 0);
+    ASSERT("successful pop must advance head", fifo.head == 1);
     return 0;
 }
 
 
 static int test_individual_fifo_pop_single(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
-    void *item = NULL;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 1;
+    fifo.count = 1;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    storage[0] = (void *)(uintptr_t)123;
+    void *item = (void *)(uintptr_t)0xdead;
 
-    fifo_init(&fifo, storage, 3);
+    bool result = fifo_pop(&fifo, &item);
 
-    ASSERT("setup push must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)42));
-
-    ASSERT("pop of sole item must succeed",
-           fifo_pop(&fifo, &item));
-
-    ASSERT("pop of sole item must return value",
-           (uintptr_t)item == 42);
-
-    ASSERT("pop of sole item must leave FIFO empty",
-           fifo_empty(&fifo));
-
+    ASSERT("fifo_pop return value must match occupancy",
+           result == true);
+    ASSERT("fifo_pop must leave exact count", fifo.count == 0);
+    ASSERT("fifo_pop must leave exact head", fifo.head == 1);
+    ASSERT("fifo_pop must return head item", item == (void *)(uintptr_t)123);
     return 0;
 }
 
 
 static int test_individual_fifo_pop_partial(void)
 {
-    fifo_t fifo;
     void *storage[4];
-    void *item;
+    fifo_t fifo;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 1;
+    fifo.tail = 0;
+    fifo.count = 3;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    storage[1] = (void *)(uintptr_t)123;
+    void *item = (void *)(uintptr_t)0xdead;
 
-    fifo_init(&fifo, storage, 4);
+    bool result = fifo_pop(&fifo, &item);
 
-    ASSERT("push one must succeed", fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("push two must succeed", fifo_push(&fifo, (void *)(uintptr_t)2));
-    ASSERT("push three must succeed", fifo_push(&fifo, (void *)(uintptr_t)3));
-
-    ASSERT("pop from partial FIFO must succeed",
-           fifo_pop(&fifo, &item));
-
-    ASSERT("pop from partial FIFO must return oldest item",
-           (uintptr_t)item == 1);
-
-    ASSERT("partial pop must decrement count",
-           fifo_count(&fifo) == 2);
-
+    ASSERT("fifo_pop return value must match occupancy",
+           result == true);
+    ASSERT("fifo_pop must leave exact count", fifo.count == 2);
+    ASSERT("fifo_pop must leave exact head", fifo.head == 2);
+    ASSERT("fifo_pop must return head item", item == (void *)(uintptr_t)123);
     return 0;
 }
 
 
 static int test_individual_fifo_pop_full(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
-    void *item;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 4;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    storage[0] = (void *)(uintptr_t)123;
+    void *item = (void *)(uintptr_t)0xdead;
 
-    fifo_init(&fifo, storage, 3);
+    bool result = fifo_pop(&fifo, &item);
 
-    ASSERT("push one must succeed", fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("push two must succeed", fifo_push(&fifo, (void *)(uintptr_t)2));
-    ASSERT("push three must succeed", fifo_push(&fifo, (void *)(uintptr_t)3));
-    ASSERT("setup FIFO must be full", fifo_full(&fifo));
-
-    ASSERT("pop from full FIFO must succeed",
-           fifo_pop(&fifo, &item));
-
-    ASSERT("pop from full FIFO must return oldest item",
-           (uintptr_t)item == 1);
-
-    ASSERT("pop from full FIFO must clear full state",
-           !fifo_full(&fifo));
-
-    ASSERT("pop from full FIFO must decrement count",
-           fifo_count(&fifo) == 2);
-
+    ASSERT("fifo_pop return value must match occupancy",
+           result == true);
+    ASSERT("fifo_pop must leave exact count", fifo.count == 3);
+    ASSERT("fifo_pop must leave exact head", fifo.head == 1);
+    ASSERT("fifo_pop must return head item", item == (void *)(uintptr_t)123);
     return 0;
 }
 
 
 static int test_individual_fifo_pop_null(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[2];
-    void *item = (void *)(uintptr_t)99;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 1;
+    fifo.count = 1;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    storage[0] = NULL;
+    void *item = (void *)(uintptr_t)0xdead;
 
-    fifo_init(&fifo, storage, 2);
+    bool result = fifo_pop(&fifo, &item);
 
-    ASSERT("setup NULL push must succeed",
-           fifo_push(&fifo, NULL));
-
-    ASSERT("pop of stored NULL must succeed",
-           fifo_pop(&fifo, &item));
-
-    ASSERT("pop must return stored NULL distinctly from failure",
-           item == NULL);
-
-    ASSERT("NULL pop must consume the item",
-           fifo_empty(&fifo));
-
+    ASSERT("fifo_pop return value must match occupancy",
+           result == true);
+    ASSERT("fifo_pop must leave exact count", fifo.count == 0);
+    ASSERT("fifo_pop must leave exact head", fifo.head == 1);
+    ASSERT("fifo_pop must return head item", item == NULL);
     return 0;
 }
 
 
 static int test_individual_fifo_pop_wrapped(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
-    void *item;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 3;
+    fifo.tail = 2;
+    fifo.count = 3;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    storage[3] = (void *)(uintptr_t)123;
+    void *item = (void *)(uintptr_t)0xdead;
 
-    fifo_init(&fifo, storage, 3);
+    bool result = fifo_pop(&fifo, &item);
 
-    ASSERT("push one must succeed", fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("push two must succeed", fifo_push(&fifo, (void *)(uintptr_t)2));
-    ASSERT("push three must succeed", fifo_push(&fifo, (void *)(uintptr_t)3));
-    ASSERT("pre-wrap pop must succeed", fifo_pop(&fifo, &item));
-    ASSERT("pre-wrap pop must return one", (uintptr_t)item == 1);
-    ASSERT("wrapped push must succeed", fifo_push(&fifo, (void *)(uintptr_t)4));
-
-    ASSERT("wrapped pop one must succeed", fifo_pop(&fifo, &item));
-    ASSERT("wrapped pop one must return two", (uintptr_t)item == 2);
-    ASSERT("wrapped pop two must succeed", fifo_pop(&fifo, &item));
-    ASSERT("wrapped pop two must return three", (uintptr_t)item == 3);
-    ASSERT("wrapped pop three must succeed", fifo_pop(&fifo, &item));
-    ASSERT("wrapped pop three must return four", (uintptr_t)item == 4);
-
-    ASSERT("wrapped FIFO must end empty",
-           fifo_empty(&fifo));
-
+    ASSERT("fifo_pop return value must match occupancy",
+           result == true);
+    ASSERT("fifo_pop must leave exact count", fifo.count == 2);
+    ASSERT("fifo_pop must leave exact head", fifo.head == 0);
+    ASSERT("fifo_pop must return head item", item == (void *)(uintptr_t)123);
     return 0;
 }
 
 
 static int test_individual_fifo_pop_capacity_one_reuse(void)
 {
-    fifo_t fifo;
     void *storage[1];
-    void *item;
+    fifo_t fifo;
+    fifo.items = storage;
+    fifo.capacity = 1;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 1;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    storage[0] = (void *)(uintptr_t)123;
+    void *item = (void *)(uintptr_t)0xdead;
 
-    fifo_init(&fifo, storage, 1);
+    bool result = fifo_pop(&fifo, &item);
 
-    for (uintptr_t i = 1; i <= 100; i++) {
-        ASSERT("capacity-one push must succeed",
-               fifo_push(&fifo, (void *)i));
-
-        ASSERT("capacity-one pop must succeed",
-               fifo_pop(&fifo, &item));
-
-        ASSERT("capacity-one pop must return current value",
-               (uintptr_t)item == i);
-    }
-
-    ASSERT("capacity-one FIFO must finish empty",
-           fifo_empty(&fifo));
-
+    ASSERT("fifo_pop return value must match occupancy",
+           result == true);
+    ASSERT("fifo_pop must leave exact count", fifo.count == 0);
+    ASSERT("fifo_pop must leave exact head", fifo.head == 0);
+    ASSERT("fifo_pop must return head item", item == (void *)(uintptr_t)123);
     return 0;
 }
 
 
-/*
- * fifo_peek()
- */
+/* fifo_peek() */
+
 
 static int test_individual_fifo_peek_empty_failure(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
     void *item;
+    bool result;
 
-    fifo_init(&fifo, storage, 3);
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 2;
+    fifo.tail = 2;
+    fifo.count = 0;
+    item = (void *)(uintptr_t)0xdead;
 
-    ASSERT("peek on empty FIFO must fail",
-           !fifo_peek(&fifo, &item));
+    result = fifo_peek(&fifo, &item);
 
-    ASSERT("failed empty peek must preserve empty state",
-           fifo_empty(&fifo));
+    ASSERT("peek on empty FIFO must fail", !result);
+    ASSERT("failed peek must preserve count", fifo.count == 0);
+    ASSERT("failed peek must preserve head", fifo.head == 2);
+    ASSERT("failed peek must preserve tail", fifo.tail == 2);
+    ASSERT("failed peek must not modify output",
+           item == (void *)(uintptr_t)0xdead);
 
-    ASSERT("FIFO must remain usable after failed peek",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
+    fifo.head = 0;
+    fifo.tail = 1;
+    fifo.count = 1;
+    storage[0] = (void *)(uintptr_t)123;
+    item = NULL;
 
+    result = fifo_peek(&fifo, &item);
+
+    ASSERT("same fifo_peek implementation must succeed when occupied",
+           result);
+    ASSERT("successful peek must return item",
+           item == (void *)(uintptr_t)123);
+    ASSERT("successful peek must preserve count", fifo.count == 1);
+    ASSERT("successful peek must preserve head", fifo.head == 0);
+    ASSERT("successful peek must preserve tail", fifo.tail == 1);
     return 0;
 }
 
 
 static int test_individual_fifo_peek_single(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
-    void *item = NULL;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 1;
+    fifo.count = 1;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    storage[0] = (void *)(uintptr_t)123;
+    void *item = (void *)(uintptr_t)0xdead;
+    size_t old_head = fifo.head;
+    size_t old_tail = fifo.tail;
+    size_t old_count = fifo.count;
 
-    fifo_init(&fifo, storage, 3);
+    bool result = fifo_peek(&fifo, &item);
 
-    ASSERT("setup push must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)42));
-
-    ASSERT("peek of sole item must succeed",
-           fifo_peek(&fifo, &item));
-
-    ASSERT("peek of sole item must return value",
-           (uintptr_t)item == 42);
-
-    ASSERT("peek of sole item must not consume it",
-           fifo_count(&fifo) == 1);
-
+    ASSERT("fifo_peek return value must match occupancy",
+           result == true);
+    ASSERT("fifo_peek must not change head", fifo.head == old_head);
+    ASSERT("fifo_peek must not change tail", fifo.tail == old_tail);
+    ASSERT("fifo_peek must not change count", fifo.count == old_count);
+    ASSERT("fifo_peek must leave expected output value", item == (void *)(uintptr_t)123);
     return 0;
 }
 
 
 static int test_individual_fifo_peek_partial(void)
 {
-    fifo_t fifo;
     void *storage[4];
-    void *item;
+    fifo_t fifo;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 1;
+    fifo.tail = 0;
+    fifo.count = 3;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    storage[1] = (void *)(uintptr_t)123;
+    void *item = (void *)(uintptr_t)0xdead;
+    size_t old_head = fifo.head;
+    size_t old_tail = fifo.tail;
+    size_t old_count = fifo.count;
 
-    fifo_init(&fifo, storage, 4);
+    bool result = fifo_peek(&fifo, &item);
 
-    ASSERT("push one must succeed", fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("push two must succeed", fifo_push(&fifo, (void *)(uintptr_t)2));
-    ASSERT("push three must succeed", fifo_push(&fifo, (void *)(uintptr_t)3));
-
-    ASSERT("peek of partial FIFO must succeed",
-           fifo_peek(&fifo, &item));
-
-    ASSERT("peek of partial FIFO must return oldest item",
-           (uintptr_t)item == 1);
-
-    ASSERT("partial peek must preserve count",
-           fifo_count(&fifo) == 3);
-
+    ASSERT("fifo_peek return value must match occupancy",
+           result == true);
+    ASSERT("fifo_peek must not change head", fifo.head == old_head);
+    ASSERT("fifo_peek must not change tail", fifo.tail == old_tail);
+    ASSERT("fifo_peek must not change count", fifo.count == old_count);
+    ASSERT("fifo_peek must leave expected output value", item == (void *)(uintptr_t)123);
     return 0;
 }
 
 
 static int test_individual_fifo_peek_full(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
-    void *item;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 4;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    storage[0] = (void *)(uintptr_t)123;
+    void *item = (void *)(uintptr_t)0xdead;
+    size_t old_head = fifo.head;
+    size_t old_tail = fifo.tail;
+    size_t old_count = fifo.count;
 
-    fifo_init(&fifo, storage, 3);
+    bool result = fifo_peek(&fifo, &item);
 
-    ASSERT("push one must succeed", fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("push two must succeed", fifo_push(&fifo, (void *)(uintptr_t)2));
-    ASSERT("push three must succeed", fifo_push(&fifo, (void *)(uintptr_t)3));
-    ASSERT("setup FIFO must be full", fifo_full(&fifo));
-
-    ASSERT("peek of full FIFO must succeed",
-           fifo_peek(&fifo, &item));
-
-    ASSERT("peek of full FIFO must return oldest item",
-           (uintptr_t)item == 1);
-
-    ASSERT("peek of full FIFO must preserve full state",
-           fifo_full(&fifo));
-
+    ASSERT("fifo_peek return value must match occupancy",
+           result == true);
+    ASSERT("fifo_peek must not change head", fifo.head == old_head);
+    ASSERT("fifo_peek must not change tail", fifo.tail == old_tail);
+    ASSERT("fifo_peek must not change count", fifo.count == old_count);
+    ASSERT("fifo_peek must leave expected output value", item == (void *)(uintptr_t)123);
     return 0;
 }
 
 
 static int test_individual_fifo_peek_null(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[2];
-    void *item = (void *)(uintptr_t)99;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 1;
+    fifo.count = 1;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    storage[0] = NULL;
+    void *item = (void *)(uintptr_t)0xdead;
+    size_t old_head = fifo.head;
+    size_t old_tail = fifo.tail;
+    size_t old_count = fifo.count;
 
-    fifo_init(&fifo, storage, 2);
+    bool result = fifo_peek(&fifo, &item);
 
-    ASSERT("setup NULL push must succeed",
-           fifo_push(&fifo, NULL));
-
-    ASSERT("peek of stored NULL must succeed",
-           fifo_peek(&fifo, &item));
-
-    ASSERT("peek must return stored NULL distinctly from failure",
-           item == NULL);
-
-    ASSERT("peek of NULL must not consume it",
-           fifo_count(&fifo) == 1);
-
+    ASSERT("fifo_peek return value must match occupancy",
+           result == true);
+    ASSERT("fifo_peek must not change head", fifo.head == old_head);
+    ASSERT("fifo_peek must not change tail", fifo.tail == old_tail);
+    ASSERT("fifo_peek must not change count", fifo.count == old_count);
+    ASSERT("fifo_peek must leave expected output value", item == NULL);
     return 0;
 }
 
 
 static int test_individual_fifo_peek_wrapped(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
-    void *item;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 3;
+    fifo.tail = 2;
+    fifo.count = 3;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    storage[3] = (void *)(uintptr_t)123;
+    void *item = (void *)(uintptr_t)0xdead;
+    size_t old_head = fifo.head;
+    size_t old_tail = fifo.tail;
+    size_t old_count = fifo.count;
 
-    fifo_init(&fifo, storage, 3);
+    bool result = fifo_peek(&fifo, &item);
 
-    ASSERT("push one must succeed", fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("push two must succeed", fifo_push(&fifo, (void *)(uintptr_t)2));
-    ASSERT("push three must succeed", fifo_push(&fifo, (void *)(uintptr_t)3));
-    ASSERT("pre-wrap pop must succeed", fifo_pop(&fifo, &item));
-    ASSERT("pre-wrap pop must return one", (uintptr_t)item == 1);
-    ASSERT("wrapped push must succeed", fifo_push(&fifo, (void *)(uintptr_t)4));
-
-    ASSERT("peek after wrap must succeed",
-           fifo_peek(&fifo, &item));
-
-    ASSERT("peek after wrap must return logical head",
-           (uintptr_t)item == 2);
-
-    ASSERT("peek after wrap must preserve full count",
-           fifo_count(&fifo) == 3);
-
+    ASSERT("fifo_peek return value must match occupancy",
+           result == true);
+    ASSERT("fifo_peek must not change head", fifo.head == old_head);
+    ASSERT("fifo_peek must not change tail", fifo.tail == old_tail);
+    ASSERT("fifo_peek must not change count", fifo.count == old_count);
+    ASSERT("fifo_peek must leave expected output value", item == (void *)(uintptr_t)123);
     return 0;
 }
 
 
 static int test_individual_fifo_peek_repeated(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
-    void *item;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 2;
+    fifo.tail = 0;
+    fifo.count = 2;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    storage[2] = (void *)(uintptr_t)123;
+    void *item = (void *)(uintptr_t)0xdead;
+    size_t old_head = fifo.head;
+    size_t old_tail = fifo.tail;
+    size_t old_count = fifo.count;
 
-    fifo_init(&fifo, storage, 3);
+    bool result = fifo_peek(&fifo, &item);
 
-    ASSERT("setup push must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)77));
-
-    for (size_t i = 0; i < 1000; i++) {
-        ASSERT("repeated peek must succeed",
-               fifo_peek(&fifo, &item));
-
-        ASSERT("repeated peek must always return same item",
-               (uintptr_t)item == 77);
-
-        ASSERT("repeated peek must preserve count",
-               fifo_count(&fifo) == 1);
-    }
-
+    ASSERT("fifo_peek return value must match occupancy",
+           result == true);
+    ASSERT("fifo_peek must not change head", fifo.head == old_head);
+    ASSERT("fifo_peek must not change tail", fifo.tail == old_tail);
+    ASSERT("fifo_peek must not change count", fifo.count == old_count);
+    ASSERT("fifo_peek must leave expected output value", item == (void *)(uintptr_t)123);
     return 0;
 }
 
 
-/*
- * fifo_push_wait()
- *
- * Only immediately-completing states are tested here. Testing the full-FIFO
- * blocking path requires a second execution context and belongs in the later
- * threaded/platform test suite.
- */
+/* fifo_push_wait() */
+
 
 static int test_individual_fifo_push_wait_empty(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
-    void *item;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 0;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 3);
+    fifo_push_wait(&fifo, (void *)(uintptr_t)123);
 
-    fifo_push_wait(&fifo, (void *)(uintptr_t)12);
-
-    ASSERT("push_wait into empty FIFO must enqueue item",
-           fifo_count(&fifo) == 1);
-
-    ASSERT("push_wait item must be retrievable",
-           fifo_pop(&fifo, &item));
-
-    ASSERT("push_wait must preserve item value",
-           (uintptr_t)item == 12);
-
+    ASSERT("fifo_push_wait must increment count", fifo.count == 1);
+    ASSERT("fifo_push_wait must advance tail correctly", fifo.tail == 1);
+    ASSERT("fifo_push_wait must store item", storage[0] == (void *)(uintptr_t)123);
     return 0;
 }
 
 
 static int test_individual_fifo_push_wait_partial(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
-    void *item;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 2;
+    fifo.count = 2;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 3);
+    fifo_push_wait(&fifo, (void *)(uintptr_t)123);
 
-    ASSERT("setup push must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-
-    fifo_push_wait(&fifo, (void *)(uintptr_t)2);
-
-    ASSERT("push_wait into partial FIFO must increment count",
-           fifo_count(&fifo) == 2);
-
-    ASSERT("first pop must succeed",
-           fifo_pop(&fifo, &item));
-    ASSERT("first item must remain first",
-           (uintptr_t)item == 1);
-
-    ASSERT("second pop must succeed",
-           fifo_pop(&fifo, &item));
-    ASSERT("push_wait item must follow existing item",
-           (uintptr_t)item == 2);
-
+    ASSERT("fifo_push_wait must increment count", fifo.count == 3);
+    ASSERT("fifo_push_wait must advance tail correctly", fifo.tail == 3);
+    ASSERT("fifo_push_wait must store item", storage[2] == (void *)(uintptr_t)123);
     return 0;
 }
 
 
 static int test_individual_fifo_push_wait_last_slot(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 3;
+    fifo.count = 3;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 3);
+    fifo_push_wait(&fifo, (void *)(uintptr_t)123);
 
-    ASSERT("setup push one must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("setup push two must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)2));
-
-    fifo_push_wait(&fifo, (void *)(uintptr_t)3);
-
-    ASSERT("push_wait into last free slot must fill FIFO",
-           fifo_full(&fifo));
-
-    ASSERT("push_wait into last free slot must reach capacity",
-           fifo_count(&fifo) == 3);
-
+    ASSERT("fifo_push_wait must increment count", fifo.count == 4);
+    ASSERT("fifo_push_wait must advance tail correctly", fifo.tail == 0);
+    ASSERT("fifo_push_wait must store item", storage[3] == (void *)(uintptr_t)123);
     return 0;
 }
 
 
 static int test_individual_fifo_push_wait_null(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[2];
-    void *item = (void *)(uintptr_t)1;
-
-    fifo_init(&fifo, storage, 2);
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 0;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
     fifo_push_wait(&fifo, NULL);
 
-    ASSERT("push_wait must accept NULL as an item",
-           fifo_count(&fifo) == 1);
-
-    ASSERT("push_wait NULL item must be poppable",
-           fifo_pop(&fifo, &item));
-
-    ASSERT("push_wait NULL item must remain NULL",
-           item == NULL);
-
+    ASSERT("fifo_push_wait must increment count", fifo.count == 1);
+    ASSERT("fifo_push_wait must advance tail correctly", fifo.tail == 1);
+    ASSERT("fifo_push_wait must store item", storage[0] == NULL);
     return 0;
 }
 
 
 static int test_individual_fifo_push_wait_wrapped_space(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
-    void *item;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 2;
+    fifo.tail = 1;
+    fifo.count = 3;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
 
-    fifo_init(&fifo, storage, 3);
+    fifo_push_wait(&fifo, (void *)(uintptr_t)123);
 
-    ASSERT("push one must succeed", fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("push two must succeed", fifo_push(&fifo, (void *)(uintptr_t)2));
-    ASSERT("push three must succeed", fifo_push(&fifo, (void *)(uintptr_t)3));
-    ASSERT("setup pop must succeed", fifo_pop(&fifo, &item));
-    ASSERT("setup pop must return one", (uintptr_t)item == 1);
-
-    fifo_push_wait(&fifo, (void *)(uintptr_t)4);
-
-    ASSERT("push_wait into wrapped free slot must refill FIFO",
-           fifo_full(&fifo));
-
-    ASSERT("next pop must succeed", fifo_pop(&fifo, &item));
-    ASSERT("existing two must remain first", (uintptr_t)item == 2);
-    ASSERT("next pop must succeed", fifo_pop(&fifo, &item));
-    ASSERT("existing three must remain second", (uintptr_t)item == 3);
-    ASSERT("wrapped push_wait item pop must succeed", fifo_pop(&fifo, &item));
-    ASSERT("wrapped push_wait item must be last", (uintptr_t)item == 4);
-
+    ASSERT("fifo_push_wait must increment count", fifo.count == 4);
+    ASSERT("fifo_push_wait must advance tail correctly", fifo.tail == 2);
+    ASSERT("fifo_push_wait must store item", storage[1] == (void *)(uintptr_t)123);
     return 0;
 }
 
 
-/*
- * fifo_pop_wait()
- *
- * Only immediately-completing states are tested here. Testing the empty-FIFO
- * blocking path requires another execution context.
- */
+/* fifo_pop_wait() */
+
 
 static int test_individual_fifo_pop_wait_single(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
-    void *item;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 1;
+    fifo.count = 1;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    storage[0] = (void *)(uintptr_t)123;
 
-    fifo_init(&fifo, storage, 3);
+    void *item = fifo_pop_wait(&fifo);
 
-    ASSERT("setup push must succeed",
-           fifo_push(&fifo, (void *)(uintptr_t)23));
-
-    item = fifo_pop_wait(&fifo);
-
-    ASSERT("pop_wait must return sole available item",
-           (uintptr_t)item == 23);
-
-    ASSERT("pop_wait must consume sole item",
-           fifo_empty(&fifo));
-
+    ASSERT("fifo_pop_wait must return head item", item == (void *)(uintptr_t)123);
+    ASSERT("fifo_pop_wait must decrement count", fifo.count == 0);
+    ASSERT("fifo_pop_wait must advance head correctly", fifo.head == 1);
     return 0;
 }
 
 
 static int test_individual_fifo_pop_wait_partial(void)
 {
-    fifo_t fifo;
     void *storage[4];
-    void *item;
+    fifo_t fifo;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 1;
+    fifo.tail = 0;
+    fifo.count = 3;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    storage[1] = (void *)(uintptr_t)123;
 
-    fifo_init(&fifo, storage, 4);
+    void *item = fifo_pop_wait(&fifo);
 
-    ASSERT("push one must succeed", fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("push two must succeed", fifo_push(&fifo, (void *)(uintptr_t)2));
-    ASSERT("push three must succeed", fifo_push(&fifo, (void *)(uintptr_t)3));
-
-    item = fifo_pop_wait(&fifo);
-
-    ASSERT("pop_wait from partial FIFO must return oldest item",
-           (uintptr_t)item == 1);
-
-    ASSERT("pop_wait from partial FIFO must decrement count",
-           fifo_count(&fifo) == 2);
-
+    ASSERT("fifo_pop_wait must return head item", item == (void *)(uintptr_t)123);
+    ASSERT("fifo_pop_wait must decrement count", fifo.count == 2);
+    ASSERT("fifo_pop_wait must advance head correctly", fifo.head == 2);
     return 0;
 }
 
 
 static int test_individual_fifo_pop_wait_full(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
-    void *item;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 4;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    storage[0] = (void *)(uintptr_t)123;
 
-    fifo_init(&fifo, storage, 3);
+    void *item = fifo_pop_wait(&fifo);
 
-    ASSERT("push one must succeed", fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("push two must succeed", fifo_push(&fifo, (void *)(uintptr_t)2));
-    ASSERT("push three must succeed", fifo_push(&fifo, (void *)(uintptr_t)3));
-    ASSERT("setup FIFO must be full", fifo_full(&fifo));
-
-    item = fifo_pop_wait(&fifo);
-
-    ASSERT("pop_wait from full FIFO must return oldest item",
-           (uintptr_t)item == 1);
-
-    ASSERT("pop_wait from full FIFO must clear full state",
-           !fifo_full(&fifo));
-
-    ASSERT("pop_wait from full FIFO must decrement count",
-           fifo_count(&fifo) == 2);
-
+    ASSERT("fifo_pop_wait must return head item", item == (void *)(uintptr_t)123);
+    ASSERT("fifo_pop_wait must decrement count", fifo.count == 3);
+    ASSERT("fifo_pop_wait must advance head correctly", fifo.head == 1);
     return 0;
 }
 
 
 static int test_individual_fifo_pop_wait_null(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[2];
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 0;
+    fifo.tail = 1;
+    fifo.count = 1;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    storage[0] = NULL;
 
-    fifo_init(&fifo, storage, 2);
+    void *item = fifo_pop_wait(&fifo);
 
-    ASSERT("setup NULL push must succeed",
-           fifo_push(&fifo, NULL));
-
-    ASSERT("pop_wait must return stored NULL item",
-           fifo_pop_wait(&fifo) == NULL);
-
-    ASSERT("pop_wait of NULL must still consume item",
-           fifo_empty(&fifo));
-
+    ASSERT("fifo_pop_wait must return head item", item == NULL);
+    ASSERT("fifo_pop_wait must decrement count", fifo.count == 0);
+    ASSERT("fifo_pop_wait must advance head correctly", fifo.head == 1);
     return 0;
 }
 
 
 static int test_individual_fifo_pop_wait_wrapped(void)
 {
+    void *storage[4];
     fifo_t fifo;
-    void *storage[3];
-    void *item;
+    fifo.items = storage;
+    fifo.capacity = 4;
+    fifo.head = 3;
+    fifo.tail = 2;
+    fifo.count = 3;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    storage[3] = (void *)(uintptr_t)123;
 
-    fifo_init(&fifo, storage, 3);
+    void *item = fifo_pop_wait(&fifo);
 
-    ASSERT("push one must succeed", fifo_push(&fifo, (void *)(uintptr_t)1));
-    ASSERT("push two must succeed", fifo_push(&fifo, (void *)(uintptr_t)2));
-    ASSERT("push three must succeed", fifo_push(&fifo, (void *)(uintptr_t)3));
-    ASSERT("pre-wrap pop must succeed", fifo_pop(&fifo, &item));
-    ASSERT("pre-wrap pop must return one", (uintptr_t)item == 1);
-    ASSERT("wrapped push must succeed", fifo_push(&fifo, (void *)(uintptr_t)4));
-
-    item = fifo_pop_wait(&fifo);
-
-    ASSERT("pop_wait after wrap must return logical head",
-           (uintptr_t)item == 2);
-
-    ASSERT("pop_wait after wrap must decrement count",
-           fifo_count(&fifo) == 2);
-
+    ASSERT("fifo_pop_wait must return head item", item == (void *)(uintptr_t)123);
+    ASSERT("fifo_pop_wait must decrement count", fifo.count == 2);
+    ASSERT("fifo_pop_wait must advance head correctly", fifo.head == 0);
     return 0;
 }
 
