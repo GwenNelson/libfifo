@@ -30,6 +30,6 @@ void fifo_platform_yield(void) {
 #endif
 }
 
-void fifo_set_yield_ballback(fifo_yield_fn yield_cb) {
+void fifo_set_yield_callback(fifo_yield_fn_t yield_cb) {
      platform_yield_cb = yield_cb;
 }

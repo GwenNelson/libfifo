@@ -25,8 +25,8 @@
  * Platform-specific yield callback stuff
  */
 
-typedef void (*fifo_yield_fn)(void); // platform-specific yield callback, this function should yield or sleep depending on what makes sense
-void fifo_set_yield_ballback(fifo_yield_fn yield_cb);
+typedef void (*fifo_yield_fn_t)(void); // platform-specific yield callback, this function should yield or sleep depending on what makes sense
+void fifo_set_yield_callback(fifo_yield_fn_t yield_cb);
 
 void fifo_platform_yield(void); // this is used by the rest of the library to either run the callback or immediately return if not set
 

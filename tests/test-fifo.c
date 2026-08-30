@@ -24,6 +24,76 @@
 static const char *failed_assert = NULL;
 
 
+/*
+ * Platform-yield test support.
+ *
+ * Blocking primitive tests install one of these callbacks to make the
+ * condition they are waiting for become true.  This lets the blocking path
+ * be tested synchronously while also proving that it called
+ * fifo_platform_yield().
+ */
+static size_t test_yield_count = 0;
+static size_t test_yield_alt_count = 0;
+static fifo_mutex_t *test_yield_mutex = NULL;
+static fifo_semaphore_t *test_yield_semaphore = NULL;
+static fifo_condition_t *test_yield_condition = NULL;
+static fifo_t *test_yield_fifo = NULL;
+static void *test_yield_fifo_item = NULL;
+
+static void test_yield_counter_callback(void)
+{
+    test_yield_count++;
+}
+
+static void test_yield_alt_counter_callback(void)
+{
+    test_yield_alt_count++;
+}
+
+static void test_yield_unlock_mutex_callback(void)
+{
+    test_yield_count++;
+    atomic_store_explicit(&test_yield_mutex->state, 0, memory_order_relaxed);
+}
+
+static void test_yield_post_semaphore_callback(void)
+{
+    test_yield_count++;
+    atomic_fetch_add_explicit(&test_yield_semaphore->count, 1,
+                              memory_order_relaxed);
+}
+
+static void test_yield_signal_condition_callback(void)
+{
+    test_yield_count++;
+    atomic_fetch_add_explicit(&test_yield_condition->sequence, 1,
+                              memory_order_relaxed);
+}
+
+static void test_yield_make_fifo_writable_callback(void)
+{
+    test_yield_count++;
+
+    if (test_yield_fifo->count != 0) {
+        test_yield_fifo->head =
+            (test_yield_fifo->head + 1) % test_yield_fifo->capacity;
+        test_yield_fifo->count--;
+    }
+}
+
+static void test_yield_make_fifo_readable_callback(void)
+{
+    test_yield_count++;
+
+    if (test_yield_fifo->count == 0) {
+        test_yield_fifo->items[test_yield_fifo->tail] = test_yield_fifo_item;
+        test_yield_fifo->tail =
+            (test_yield_fifo->tail + 1) % test_yield_fifo->capacity;
+        test_yield_fifo->count++;
+    }
+}
+
+
 #ifdef TEST_GDB
 
 #define TEST_FAILURE_TRAP()                                               \
@@ -1446,6 +1516,81 @@ static int test_fifo_reuse_after_drain(void)
 
 
 
+
+/*
+ * Platform yield callback tests
+ */
+
+static int test_platform_yield_invokes_callback(void)
+{
+    test_yield_count = 0;
+    fifo_set_yield_callback(test_yield_counter_callback);
+
+    fifo_platform_yield();
+
+    ASSERT("platform yield must invoke installed callback",
+           test_yield_count == 1);
+
+    fifo_set_yield_callback(NULL);
+    return 0;
+}
+
+
+static int test_platform_yield_repeated_callback(void)
+{
+    test_yield_count = 0;
+    fifo_set_yield_callback(test_yield_counter_callback);
+
+    fifo_platform_yield();
+    fifo_platform_yield();
+    fifo_platform_yield();
+
+    ASSERT("platform yield must invoke callback once per call",
+           test_yield_count == 3);
+
+    fifo_set_yield_callback(NULL);
+    return 0;
+}
+
+
+static int test_platform_yield_replaces_callback(void)
+{
+    test_yield_count = 0;
+    test_yield_alt_count = 0;
+
+    fifo_set_yield_callback(test_yield_counter_callback);
+    fifo_platform_yield();
+
+    fifo_set_yield_callback(test_yield_alt_counter_callback);
+    fifo_platform_yield();
+
+    ASSERT("original yield callback must run before replacement",
+           test_yield_count == 1);
+    ASSERT("replacement yield callback must run after replacement",
+           test_yield_alt_count == 1);
+
+    fifo_set_yield_callback(NULL);
+    return 0;
+}
+
+
+static int test_platform_yield_clear_callback(void)
+{
+    test_yield_count = 0;
+
+    fifo_set_yield_callback(test_yield_counter_callback);
+    fifo_platform_yield();
+    ASSERT("installed yield callback must run", test_yield_count == 1);
+
+    fifo_set_yield_callback(NULL);
+    fifo_platform_yield();
+
+    ASSERT("cleared yield callback must not be invoked",
+           test_yield_count == 1);
+    return 0;
+}
+
+
 /*
  * ======================================================================
  * Individual function exhaustive tests
@@ -1759,6 +1904,29 @@ static int test_individual_mutex_lock_reusable(void)
 }
 
 
+
+static int test_individual_mutex_lock_contended_yields(void)
+{
+    fifo_mutex_t mutex;
+
+    atomic_store_explicit(&mutex.state, 1, memory_order_relaxed);
+    test_yield_count = 0;
+    test_yield_mutex = &mutex;
+    fifo_set_yield_callback(test_yield_unlock_mutex_callback);
+
+    fifo_mutex_lock(&mutex);
+
+    fifo_set_yield_callback(NULL);
+    test_yield_mutex = NULL;
+
+    ASSERT("contended mutex_lock must call platform yield",
+           test_yield_count > 0);
+    ASSERT("mutex_lock must acquire mutex after contention clears",
+           atomic_load_explicit(&mutex.state, memory_order_relaxed) != 0);
+    return 0;
+}
+
+
 /* fifo_mutex_unlock() */
 
 
@@ -1945,6 +2113,29 @@ static int test_individual_semaphore_wait_after_post(void)
     fifo_semaphore_wait(&semaphore);
 
     ASSERT("semaphore_wait must consume exactly one available unit",
+           atomic_load_explicit(&semaphore.count, memory_order_relaxed) == 0);
+    return 0;
+}
+
+
+
+static int test_individual_semaphore_wait_zero_yields(void)
+{
+    fifo_semaphore_t semaphore;
+
+    atomic_store_explicit(&semaphore.count, 0, memory_order_relaxed);
+    test_yield_count = 0;
+    test_yield_semaphore = &semaphore;
+    fifo_set_yield_callback(test_yield_post_semaphore_callback);
+
+    fifo_semaphore_wait(&semaphore);
+
+    fifo_set_yield_callback(NULL);
+    test_yield_semaphore = NULL;
+
+    ASSERT("semaphore_wait on zero must call platform yield",
+           test_yield_count > 0);
+    ASSERT("semaphore_wait must consume unit made available while yielding",
            atomic_load_explicit(&semaphore.count, memory_order_relaxed) == 0);
     return 0;
 }
@@ -2274,6 +2465,36 @@ static int test_individual_condition_signal_broadcast_sequence(void)
     ASSERT("condition operation must advance sequence once per call",
            atomic_load_explicit(&condition.sequence,
                                 memory_order_relaxed) == 19);
+    return 0;
+}
+
+
+
+/* fifo_condition_wait() */
+
+static int test_individual_condition_wait_yields(void)
+{
+    fifo_condition_t condition;
+    fifo_mutex_t mutex;
+
+    atomic_store_explicit(&condition.sequence, 7, memory_order_relaxed);
+    atomic_store_explicit(&mutex.state, 1, memory_order_relaxed);
+    test_yield_count = 0;
+    test_yield_condition = &condition;
+    fifo_set_yield_callback(test_yield_signal_condition_callback);
+
+    fifo_condition_wait(&condition, &mutex);
+
+    fifo_set_yield_callback(NULL);
+    test_yield_condition = NULL;
+
+    ASSERT("condition_wait must call platform yield while waiting",
+           test_yield_count > 0);
+    ASSERT("condition_wait must observe sequence change",
+           atomic_load_explicit(&condition.sequence,
+                                memory_order_relaxed) == 8);
+    ASSERT("condition_wait must return with mutex reacquired",
+           atomic_load_explicit(&mutex.state, memory_order_relaxed) != 0);
     return 0;
 }
 
@@ -3688,6 +3909,79 @@ static int test_individual_fifo_pop_wait_wrapped(void)
 }
 
 
+
+static int test_individual_fifo_push_wait_full_yields(void)
+{
+    void *storage[2] = {
+        (void *)(uintptr_t)1,
+        (void *)(uintptr_t)2
+    };
+    fifo_t fifo;
+
+    fifo.items = storage;
+    fifo.capacity = 2;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 2;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+
+    test_yield_count = 0;
+    test_yield_fifo = &fifo;
+    fifo_set_yield_callback(test_yield_make_fifo_writable_callback);
+
+    fifo_push_wait(&fifo, (void *)(uintptr_t)3);
+
+    fifo_set_yield_callback(NULL);
+    test_yield_fifo = NULL;
+
+    ASSERT("fifo_push_wait on full FIFO must call platform yield",
+           test_yield_count > 0);
+    ASSERT("fifo_push_wait must leave FIFO full after inserting new item",
+           fifo.count == 2);
+    ASSERT("fifo_push_wait must store new item after space becomes available",
+           storage[0] == (void *)(uintptr_t)3);
+    return 0;
+}
+
+
+static int test_individual_fifo_pop_wait_empty_yields(void)
+{
+    void *storage[2] = { NULL, NULL };
+    fifo_t fifo;
+    void *item;
+
+    fifo.items = storage;
+    fifo.capacity = 2;
+    fifo.head = 0;
+    fifo.tail = 0;
+    fifo.count = 0;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+
+    test_yield_count = 0;
+    test_yield_fifo = &fifo;
+    test_yield_fifo_item = (void *)(uintptr_t)123;
+    fifo_set_yield_callback(test_yield_make_fifo_readable_callback);
+
+    item = fifo_pop_wait(&fifo);
+
+    fifo_set_yield_callback(NULL);
+    test_yield_fifo = NULL;
+    test_yield_fifo_item = NULL;
+
+    ASSERT("fifo_pop_wait on empty FIFO must call platform yield",
+           test_yield_count > 0);
+    ASSERT("fifo_pop_wait must return item made available while yielding",
+           item == (void *)(uintptr_t)123);
+    ASSERT("fifo_pop_wait must consume item made available while yielding",
+           fifo.count == 0);
+    return 0;
+}
+
+
 int main(int argc, char **argv)
 {
     int passed_tests = 0;
@@ -3781,6 +4075,7 @@ int main(int argc, char **argv)
     TEST("condition_broadcast advances sequence",           test_individual_condition_broadcast_changes_sequence)
     TEST("condition signal/broadcast both advance",         test_individual_condition_signal_broadcast_sequence)
 
+
     fprintf(stdout, "\nfifo_init()\n");
     fprintf(stdout, "----------------------------------------------------------------------\n");
     TEST("fifo_init handles capacity one",                  test_individual_fifo_init_capacity_one)
@@ -3871,7 +4166,19 @@ int main(int argc, char **argv)
 
     fprintf(stdout,"\n");
 
-    fprintf(stdout, "Spinlocks\n");
+    fprintf(stdout, "Platform yield and blocking-path integration\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("platform yield invokes installed callback",          test_platform_yield_invokes_callback)
+    TEST("platform yield invokes callback repeatedly",         test_platform_yield_repeated_callback)
+    TEST("platform yield replaces callback",                   test_platform_yield_replaces_callback)
+    TEST("platform yield clears callback",                     test_platform_yield_clear_callback)
+    TEST("contended mutex_lock calls platform yield",          test_individual_mutex_lock_contended_yields)
+    TEST("zero semaphore_wait calls platform yield",           test_individual_semaphore_wait_zero_yields)
+    TEST("condition_wait calls platform yield",                test_individual_condition_wait_yields)
+    TEST("full fifo_push_wait calls platform yield",           test_individual_fifo_push_wait_full_yields)
+    TEST("empty fifo_pop_wait calls platform yield",           test_individual_fifo_pop_wait_empty_yields)
+
+    fprintf(stdout, "\nSpinlocks\n");
     fprintf(stdout, "----------------------------------------------------------------------\n");
 
     TEST("Initialised spinlock is unlocked",           test_spinlock_init_unlocked)
