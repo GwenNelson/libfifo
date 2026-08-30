@@ -20,6 +20,16 @@
 #include <stddef.h>
 #include <stdatomic.h>
 
+
+/*
+ * Platform-specific yield callback stuff
+ */
+
+typedef void (*fifo_yield_fn)(void); // platform-specific yield callback, this function should yield or sleep depending on what makes sense
+void fifo_set_yield_ballback(fifo_yield_fn yield_cb);
+
+void fifo_platform_yield(void); // this is used by the rest of the library to either run the callback or immediately return if not set
+
 /*
  * Spinlocks
  */
@@ -38,7 +48,6 @@ void fifo_spinlock_unlock(fifo_spinlock_t *lock);
 /*
  * Mutexes
  */
-
 typedef struct fifo_mutex {
     /* Platform-independent state will go here. */
     atomic_uint state;
