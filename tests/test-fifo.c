@@ -70,6 +70,33 @@ static void test_yield_signal_condition_callback(void)
                               memory_order_relaxed);
 }
 
+static fifo_mutex_t *test_condition_wait_mutex = NULL;
+static bool test_condition_wait_saw_unlocked = false;
+
+static void test_yield_signal_condition_check_mutex_callback(void)
+{
+    test_yield_count++;
+
+    if (atomic_load_explicit(&test_condition_wait_mutex->state,
+                             memory_order_relaxed) == 0)
+        test_condition_wait_saw_unlocked = true;
+
+    atomic_fetch_add_explicit(&test_yield_condition->sequence, 1,
+                              memory_order_relaxed);
+}
+
+static void test_yield_public_signal_condition_callback(void)
+{
+    test_yield_count++;
+    fifo_condition_signal(test_yield_condition);
+}
+
+static void test_yield_public_broadcast_condition_callback(void)
+{
+    test_yield_count++;
+    fifo_condition_broadcast(test_yield_condition);
+}
+
 static void test_yield_make_fifo_writable_callback(void)
 {
     test_yield_count++;
@@ -488,10 +515,6 @@ static int test_semaphore_multiple_posts(void)
 /*
  * Condition variable tests
  *
- * There is no useful externally observable synchronous state for a
- * condition variable yet. Keep the initialisation test, but require
- * functioning synchronisation machinery around it so a completely
- * stubbed libfifo cannot accidentally report success.
  */
 
 static int test_condition_init(void)
@@ -2495,6 +2518,155 @@ static int test_individual_condition_wait_yields(void)
 }
 
 
+static int test_individual_condition_broadcast_repeated(void)
+{
+    fifo_condition_t condition;
+    atomic_store_explicit(&condition.sequence, 100, memory_order_relaxed);
+
+    fifo_condition_broadcast(&condition);
+    fifo_condition_broadcast(&condition);
+    fifo_condition_broadcast(&condition);
+
+    ASSERT("each condition_broadcast must advance sequence exactly once",
+           atomic_load_explicit(&condition.sequence,
+                                memory_order_relaxed) == 103);
+    return 0;
+}
+
+
+static int test_individual_condition_wait_releases_mutex(void)
+{
+    fifo_condition_t condition;
+    fifo_mutex_t mutex;
+
+    atomic_store_explicit(&condition.sequence, 20, memory_order_relaxed);
+    atomic_store_explicit(&mutex.state, 1, memory_order_relaxed);
+    test_yield_count = 0;
+    test_yield_condition = &condition;
+    test_condition_wait_mutex = &mutex;
+    test_condition_wait_saw_unlocked = false;
+    fifo_set_yield_callback(test_yield_signal_condition_check_mutex_callback);
+
+    fifo_condition_wait(&condition, &mutex);
+
+    fifo_set_yield_callback(NULL);
+    test_yield_condition = NULL;
+    test_condition_wait_mutex = NULL;
+
+    ASSERT("condition_wait must release mutex while waiting",
+           test_condition_wait_saw_unlocked);
+    return 0;
+}
+
+
+static int test_individual_condition_wait_reacquires_mutex(void)
+{
+    fifo_condition_t condition;
+    fifo_mutex_t mutex;
+
+    atomic_store_explicit(&condition.sequence, 30, memory_order_relaxed);
+    atomic_store_explicit(&mutex.state, 1, memory_order_relaxed);
+    test_yield_count = 0;
+    test_yield_condition = &condition;
+    fifo_set_yield_callback(test_yield_signal_condition_callback);
+
+    fifo_condition_wait(&condition, &mutex);
+
+    fifo_set_yield_callback(NULL);
+    test_yield_condition = NULL;
+
+    ASSERT("condition_wait must reacquire mutex before returning",
+           atomic_load_explicit(&mutex.state,
+                                memory_order_relaxed) != 0);
+    return 0;
+}
+
+
+static int test_condition_wait_signal(void)
+{
+    fifo_condition_t condition;
+    fifo_mutex_t mutex;
+
+    fifo_condition_init(&condition);
+    fifo_mutex_init(&mutex);
+    test_yield_condition = &condition;
+    test_yield_count = 0;
+    fifo_set_yield_callback(test_yield_public_signal_condition_callback);
+    fifo_mutex_lock(&mutex);
+
+    fifo_condition_wait(&condition, &mutex);
+
+    ASSERT("condition wait must yield before signal", test_yield_count > 0);
+    ASSERT("signal must advance condition sequence",
+           atomic_load_explicit(&condition.sequence,
+                                memory_order_relaxed) > 0);
+    ASSERT("condition_wait must return holding mutex",
+           !fifo_mutex_trylock(&mutex));
+
+    fifo_mutex_unlock(&mutex);
+    fifo_set_yield_callback(NULL);
+    test_yield_condition = NULL;
+    return 0;
+}
+
+
+static int test_condition_wait_broadcast(void)
+{
+    fifo_condition_t condition;
+    fifo_mutex_t mutex;
+
+    fifo_condition_init(&condition);
+    fifo_mutex_init(&mutex);
+    test_yield_condition = &condition;
+    test_yield_count = 0;
+    fifo_set_yield_callback(test_yield_public_broadcast_condition_callback);
+    fifo_mutex_lock(&mutex);
+
+    fifo_condition_wait(&condition, &mutex);
+
+    ASSERT("condition wait must yield before broadcast", test_yield_count > 0);
+    ASSERT("broadcast must advance condition sequence",
+           atomic_load_explicit(&condition.sequence,
+                                memory_order_relaxed) > 0);
+    ASSERT("condition_wait must return holding mutex",
+           !fifo_mutex_trylock(&mutex));
+
+    fifo_mutex_unlock(&mutex);
+    fifo_set_yield_callback(NULL);
+    test_yield_condition = NULL;
+    return 0;
+}
+
+
+static int test_condition_wait_unlocks_while_waiting(void)
+{
+    fifo_condition_t condition;
+    fifo_mutex_t mutex;
+
+    fifo_condition_init(&condition);
+    fifo_mutex_init(&mutex);
+    test_yield_condition = &condition;
+    test_condition_wait_mutex = &mutex;
+    test_yield_count = 0;
+    test_condition_wait_saw_unlocked = false;
+    fifo_set_yield_callback(test_yield_signal_condition_check_mutex_callback);
+    fifo_mutex_lock(&mutex);
+
+    fifo_condition_wait(&condition, &mutex);
+
+    ASSERT("another execution context must see mutex unlocked while waiter waits",
+           test_condition_wait_saw_unlocked);
+    ASSERT("condition_wait must reacquire mutex before returning",
+           !fifo_mutex_trylock(&mutex));
+
+    fifo_mutex_unlock(&mutex);
+    fifo_set_yield_callback(NULL);
+    test_yield_condition = NULL;
+    test_condition_wait_mutex = NULL;
+    return 0;
+}
+
+
 /* fifo_init() */
 
 
@@ -4070,6 +4242,9 @@ int main(int argc, char **argv)
     TEST("condition_signal advances every time",            test_individual_condition_signal_repeated)
     TEST("condition_broadcast advances sequence",           test_individual_condition_broadcast_changes_sequence)
     TEST("condition signal/broadcast both advance",         test_individual_condition_signal_broadcast_sequence)
+    TEST("condition_broadcast advances every time",        test_individual_condition_broadcast_repeated)
+    TEST("condition_wait releases mutex while waiting",     test_individual_condition_wait_releases_mutex)
+    TEST("condition_wait reacquires mutex before return",    test_individual_condition_wait_reacquires_mutex)
 
 
     fprintf(stdout, "\nfifo_init()\n");
@@ -4207,6 +4382,9 @@ int main(int argc, char **argv)
     fprintf(stdout, "----------------------------------------------------------------------\n");
 
     TEST("Condition variable initialisation",          test_condition_init)
+    TEST("Condition wait integrates with signal",         test_condition_wait_signal)
+    TEST("Condition wait integrates with broadcast",      test_condition_wait_broadcast)
+    TEST("Condition wait unlocks mutex while waiting",    test_condition_wait_unlocks_while_waiting)
 
     fprintf(stdout, "\nFIFO initialisation and state\n");
     fprintf(stdout, "----------------------------------------------------------------------\n");
