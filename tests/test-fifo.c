@@ -21,6 +21,12 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <sched.h>
+#include <errno.h>
+#include <signal.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
 
 
 static const char *failed_assert = NULL;
@@ -151,13 +157,190 @@ static void test_yield_make_fifo_readable_callback(void)
     } while (0);
 
 
+
+#ifndef TEST_TIMEOUT_MS
+#define TEST_TIMEOUT_MS 1000U
+#endif
+
+#define TEST_FAILURE_TEXT_MAX 512
+
+struct isolated_test_result {
+    int result;
+    char failed_assert[TEST_FAILURE_TEXT_MAX];
+};
+
+static uint64_t test_monotonic_ms(void)
+{
+    struct timespec now;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+
+    return (uint64_t)now.tv_sec * 1000U +
+           (uint64_t)now.tv_nsec / 1000000U;
+}
+
+static int run_test_isolated(int (*test_function)(void),
+                             char *failure_text,
+                             size_t failure_text_size,
+                             bool *timed_out,
+                             int *terminating_signal)
+{
+    int pipefd[2];
+    pid_t pid;
+    uint64_t started;
+    int status = 0;
+    struct isolated_test_result child_result;
+    ssize_t got;
+
+    *timed_out = false;
+    *terminating_signal = 0;
+
+    if (failure_text_size != 0)
+        failure_text[0] = '\0';
+
+    if (pipe(pipefd) != 0) {
+        if (failure_text_size != 0)
+            snprintf(failure_text, failure_text_size,
+                     "test harness pipe() failed: %s", strerror(errno));
+        return 1;
+    }
+
+    /*
+     * Flush inherited stdio buffers before fork so a child killed during
+     * a test cannot later duplicate buffered harness output.
+     */
+    fflush(NULL);
+
+    pid = fork();
+
+    if (pid < 0) {
+        int saved_errno = errno;
+
+        close(pipefd[0]);
+        close(pipefd[1]);
+
+        if (failure_text_size != 0)
+            snprintf(failure_text, failure_text_size,
+                     "test harness fork() failed: %s",
+                     strerror(saved_errno));
+        return 1;
+    }
+
+    if (pid == 0) {
+        int result;
+
+        close(pipefd[0]);
+
+        failed_assert = NULL;
+        result = test_function();
+
+        child_result.result = result;
+        child_result.failed_assert[0] = '\0';
+
+        if (failed_assert != NULL) {
+            snprintf(child_result.failed_assert,
+                     sizeof(child_result.failed_assert),
+                     "%s", failed_assert);
+        }
+
+        /*
+         * A short fixed-size write is safely below PIPE_BUF, so the parent
+         * either receives the complete result record or detects an abnormal
+         * child exit.
+         */
+        (void)write(pipefd[1], &child_result, sizeof(child_result));
+        close(pipefd[1]);
+        _exit(result == 0 ? 0 : 1);
+    }
+
+    close(pipefd[1]);
+    started = test_monotonic_ms();
+
+    for (;;) {
+        pid_t waited = waitpid(pid, &status, WNOHANG);
+
+        if (waited == pid)
+            break;
+
+        if (waited < 0) {
+            if (errno == EINTR)
+                continue;
+
+            if (failure_text_size != 0)
+                snprintf(failure_text, failure_text_size,
+                         "test harness waitpid() failed: %s",
+                         strerror(errno));
+            close(pipefd[0]);
+            return 1;
+        }
+
+        if (test_monotonic_ms() - started >= TEST_TIMEOUT_MS) {
+            *timed_out = true;
+            (void)kill(pid, SIGKILL);
+
+            while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+                ;
+
+            close(pipefd[0]);
+            return 1;
+        }
+
+        {
+            struct timespec pause = { 0, 1000000L };
+            nanosleep(&pause, NULL);
+        }
+    }
+
+    if (WIFSIGNALED(status)) {
+        *terminating_signal = WTERMSIG(status);
+        close(pipefd[0]);
+        return 1;
+    }
+
+    memset(&child_result, 0, sizeof(child_result));
+    got = read(pipefd[0], &child_result, sizeof(child_result));
+    close(pipefd[0]);
+
+    if (got == (ssize_t)sizeof(child_result)) {
+        if (failure_text_size != 0 &&
+            child_result.failed_assert[0] != '\0') {
+            snprintf(failure_text, failure_text_size, "%s",
+                     child_result.failed_assert);
+        }
+
+        return child_result.result;
+    }
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        if (failure_text_size != 0)
+            snprintf(failure_text, failure_text_size,
+                     "test exited without returning a result");
+        return 1;
+    }
+
+    if (failure_text_size != 0)
+        snprintf(failure_text, failure_text_size,
+                 "test returned no result to harness");
+    return 1;
+}
+
+
 #define TEST(desc, f)                                                     \
     do {                                                                  \
         int result;                                                       \
+        bool timed_out;                                                   \
+        int terminating_signal;                                          \
+        char failure_text[TEST_FAILURE_TEXT_MAX];                         \
                                                                           \
-        failed_assert = NULL;                                             \
         fprintf(stdout, "Testing: %-58s", desc);                          \
-        result = (f)();                                                   \
+        fflush(stdout);                                                   \
+                                                                          \
+        result = run_test_isolated((f),                                   \
+                                   failure_text,                          \
+                                   sizeof(failure_text),                  \
+                                   &timed_out,                            \
+                                   &terminating_signal);                  \
                                                                           \
         if (result == 0) {                                                \
             passed_tests++;                                               \
@@ -165,8 +348,17 @@ static void test_yield_make_fifo_readable_callback(void)
         } else {                                                          \
             failed_tests++;                                               \
             fprintf(stdout, "FAIL");                                      \
-            if (failed_assert != NULL)                                    \
-                fprintf(stdout, "  -  %s", failed_assert);                \
+                                                                          \
+            if (timed_out) {                                              \
+                fprintf(stdout, "  -  timed out after %u ms",             \
+                        (unsigned int)TEST_TIMEOUT_MS);                    \
+            } else if (terminating_signal != 0) {                         \
+                fprintf(stdout, "  -  terminated by signal %d",          \
+                        terminating_signal);                               \
+            } else if (failure_text[0] != '\0') {                         \
+                fprintf(stdout, "  -  %s", failure_text);                 \
+            }                                                             \
+                                                                          \
             fprintf(stdout, "\n");                                        \
         }                                                                 \
                                                                           \
@@ -2322,6 +2514,85 @@ static int test_individual_semaphore_post_after_consumption(void)
 }
 
 
+
+/*
+ * Run condition-variable operations in a cancellable worker so that a
+ * broken implementation which never returns becomes a normal RED test
+ * rather than hanging the entire test process.
+ */
+enum condition_bounded_op {
+    CONDITION_BOUNDED_SIGNAL,
+    CONDITION_BOUNDED_BROADCAST,
+    CONDITION_BOUNDED_WAIT
+};
+
+struct condition_bounded_call {
+    enum condition_bounded_op op;
+    fifo_condition_t *condition;
+    fifo_mutex_t *mutex;
+    size_t repeat;
+    atomic_bool completed;
+};
+
+static void *condition_bounded_worker(void *opaque)
+{
+    struct condition_bounded_call *call = opaque;
+
+    /*
+     * These tests deliberately need to recover even from an implementation
+     * stuck in a tight loop with no cancellation points.
+     */
+    pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+
+    for (size_t i = 0; i < call->repeat; i++) {
+        switch (call->op) {
+        case CONDITION_BOUNDED_SIGNAL:
+            fifo_condition_signal(call->condition);
+            break;
+        case CONDITION_BOUNDED_BROADCAST:
+            fifo_condition_broadcast(call->condition);
+            break;
+        case CONDITION_BOUNDED_WAIT:
+            fifo_condition_wait(call->condition, call->mutex);
+            break;
+        }
+    }
+
+    atomic_store_explicit(&call->completed, true, memory_order_release);
+    return NULL;
+}
+
+static bool run_condition_bounded(enum condition_bounded_op op,
+                                  fifo_condition_t *condition,
+                                  fifo_mutex_t *mutex,
+                                  size_t repeat)
+{
+    pthread_t thread;
+    struct condition_bounded_call call;
+
+    call.op = op;
+    call.condition = condition;
+    call.mutex = mutex;
+    call.repeat = repeat;
+    atomic_init(&call.completed, false);
+
+    if (pthread_create(&thread, NULL, condition_bounded_worker, &call) != 0)
+        return false;
+
+    for (size_t i = 0; i < 100000; i++) {
+        if (atomic_load_explicit(&call.completed, memory_order_acquire)) {
+            pthread_join(thread, NULL);
+            return true;
+        }
+        sched_yield();
+    }
+
+    pthread_cancel(thread);
+    pthread_join(thread, NULL);
+    return false;
+}
+
 /* fifo_condition_init(), signal(), broadcast() */
 
 
@@ -2353,7 +2624,9 @@ static int test_individual_condition_signal_one_waiter(void)
     atomic_store_explicit(&condition.next_ticket, 18, memory_order_relaxed);
     atomic_store_explicit(&condition.wake_ticket, 17, memory_order_relaxed);
 
-    fifo_condition_signal(&condition);
+    ASSERT("condition_signal must return",
+           run_condition_bounded(CONDITION_BOUNDED_SIGNAL,
+                                 &condition, NULL, 1));
 
     ASSERT("condition_signal must wake exactly one registered waiter",
            atomic_load_explicit(&condition.wake_ticket,
@@ -2372,14 +2645,18 @@ static int test_individual_condition_signal_no_waiters(void)
     /* Positive control: prove this implementation can change wake_ticket. */
     atomic_store_explicit(&condition.next_ticket, 18, memory_order_relaxed);
     atomic_store_explicit(&condition.wake_ticket, 17, memory_order_relaxed);
-    fifo_condition_signal(&condition);
+    ASSERT("condition_signal positive control must return",
+           run_condition_bounded(CONDITION_BOUNDED_SIGNAL,
+                                 &condition, NULL, 1));
     ASSERT("positive-control signal must wake an existing waiter",
            atomic_load_explicit(&condition.wake_ticket,
                                 memory_order_relaxed) == 18);
 
     atomic_store_explicit(&condition.next_ticket, 33, memory_order_relaxed);
     atomic_store_explicit(&condition.wake_ticket, 33, memory_order_relaxed);
-    fifo_condition_signal(&condition);
+    ASSERT("condition_signal with no waiters must return",
+           run_condition_bounded(CONDITION_BOUNDED_SIGNAL,
+                                 &condition, NULL, 1));
 
     ASSERT("signal with no registered waiter must not bank a future wakeup",
            atomic_load_explicit(&condition.wake_ticket,
@@ -2398,8 +2675,9 @@ static int test_individual_condition_signal_repeated(void)
     atomic_store_explicit(&condition.next_ticket, 117, memory_order_relaxed);
     atomic_store_explicit(&condition.wake_ticket, 17, memory_order_relaxed);
 
-    for (size_t i = 0; i < 100; i++)
-        fifo_condition_signal(&condition);
+    ASSERT("repeated condition_signal calls must return",
+           run_condition_bounded(CONDITION_BOUNDED_SIGNAL,
+                                 &condition, NULL, 100));
 
     ASSERT("repeated signals must wake one waiter per call",
            atomic_load_explicit(&condition.wake_ticket,
@@ -2408,7 +2686,9 @@ static int test_individual_condition_signal_repeated(void)
            atomic_load_explicit(&condition.next_ticket,
                                 memory_order_relaxed) == 117);
 
-    fifo_condition_signal(&condition);
+    ASSERT("extra condition_signal must return",
+           run_condition_bounded(CONDITION_BOUNDED_SIGNAL,
+                                 &condition, NULL, 1));
     ASSERT("extra signal after all waiters are released must be ignored",
            atomic_load_explicit(&condition.wake_ticket,
                                 memory_order_relaxed) == 117);
@@ -2423,7 +2703,9 @@ static int test_individual_condition_broadcast_waiters(void)
     atomic_store_explicit(&condition.next_ticket, 42, memory_order_relaxed);
     atomic_store_explicit(&condition.wake_ticket, 17, memory_order_relaxed);
 
-    fifo_condition_broadcast(&condition);
+    ASSERT("condition_broadcast must return",
+           run_condition_bounded(CONDITION_BOUNDED_BROADCAST,
+                                 &condition, NULL, 1));
 
     ASSERT("condition_broadcast must wake every currently registered waiter",
            atomic_load_explicit(&condition.wake_ticket,
@@ -2442,14 +2724,18 @@ static int test_individual_condition_broadcast_no_waiters(void)
     /* Positive control: broadcast must first demonstrate observable work. */
     atomic_store_explicit(&condition.next_ticket, 42, memory_order_relaxed);
     atomic_store_explicit(&condition.wake_ticket, 17, memory_order_relaxed);
-    fifo_condition_broadcast(&condition);
+    ASSERT("condition_broadcast must return",
+           run_condition_bounded(CONDITION_BOUNDED_BROADCAST,
+                                 &condition, NULL, 1));
     ASSERT("positive-control broadcast must release registered waiters",
            atomic_load_explicit(&condition.wake_ticket,
                                 memory_order_relaxed) == 42);
 
     atomic_store_explicit(&condition.next_ticket, 55, memory_order_relaxed);
     atomic_store_explicit(&condition.wake_ticket, 55, memory_order_relaxed);
-    fifo_condition_broadcast(&condition);
+    ASSERT("condition_broadcast must return",
+           run_condition_bounded(CONDITION_BOUNDED_BROADCAST,
+                                 &condition, NULL, 1));
 
     ASSERT("broadcast with no waiters must not bank future wakeups",
            atomic_load_explicit(&condition.wake_ticket,
@@ -2468,7 +2754,9 @@ static int test_individual_condition_broadcast_repeated(void)
     atomic_store_explicit(&condition.next_ticket, 103, memory_order_relaxed);
     atomic_store_explicit(&condition.wake_ticket, 100, memory_order_relaxed);
 
-    fifo_condition_broadcast(&condition);
+    ASSERT("condition_broadcast must return",
+           run_condition_bounded(CONDITION_BOUNDED_BROADCAST,
+                                 &condition, NULL, 1));
 
     ASSERT("first broadcast must move wake frontier to next_ticket",
            atomic_load_explicit(&condition.wake_ticket,
@@ -2476,7 +2764,9 @@ static int test_individual_condition_broadcast_repeated(void)
 
     /* Simulate three new waiters registering after the first broadcast. */
     atomic_store_explicit(&condition.next_ticket, 106, memory_order_relaxed);
-    fifo_condition_broadcast(&condition);
+    ASSERT("condition_broadcast must return",
+           run_condition_bounded(CONDITION_BOUNDED_BROADCAST,
+                                 &condition, NULL, 1));
 
     ASSERT("later broadcast must release newly registered waiters",
            atomic_load_explicit(&condition.wake_ticket,
@@ -2500,10 +2790,15 @@ static int test_individual_condition_wait_yields(void)
     test_yield_condition = &condition;
     fifo_set_yield_callback(test_yield_signal_condition_callback);
 
-    fifo_condition_wait(&condition, &mutex);
+    bool wait_returned =
+        run_condition_bounded(CONDITION_BOUNDED_WAIT,
+                              &condition, &mutex, 1);
 
     fifo_set_yield_callback(NULL);
     test_yield_condition = NULL;
+
+    ASSERT("condition_wait must return after its wake condition is satisfied",
+           wait_returned);
 
     ASSERT("condition_wait must call platform yield while waiting",
            test_yield_count > 0);
@@ -2533,11 +2828,16 @@ static int test_individual_condition_wait_releases_mutex(void)
     test_condition_wait_saw_unlocked = false;
     fifo_set_yield_callback(test_yield_signal_condition_check_mutex_callback);
 
-    fifo_condition_wait(&condition, &mutex);
+    bool wait_returned =
+        run_condition_bounded(CONDITION_BOUNDED_WAIT,
+                              &condition, &mutex, 1);
 
     fifo_set_yield_callback(NULL);
     test_yield_condition = NULL;
     test_condition_wait_mutex = NULL;
+
+    ASSERT("condition_wait must return after its wake condition is satisfied",
+           wait_returned);
 
     ASSERT("condition_wait must release mutex while waiting",
            test_condition_wait_saw_unlocked);
@@ -2560,10 +2860,15 @@ static int test_individual_condition_wait_reacquires_mutex(void)
     test_yield_condition = &condition;
     fifo_set_yield_callback(test_yield_signal_condition_callback);
 
-    fifo_condition_wait(&condition, &mutex);
+    bool wait_returned =
+        run_condition_bounded(CONDITION_BOUNDED_WAIT,
+                              &condition, &mutex, 1);
 
     fifo_set_yield_callback(NULL);
     test_yield_condition = NULL;
+
+    ASSERT("condition_wait must return after its wake condition is satisfied",
+           wait_returned);
 
     ASSERT("condition_wait must reacquire mutex before returning",
            atomic_load_explicit(&mutex.state,
