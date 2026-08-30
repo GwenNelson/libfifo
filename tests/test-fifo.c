@@ -19,6 +19,8 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <pthread.h>
+#include <sched.h>
 
 
 static const char *failed_assert = NULL;
@@ -4150,6 +4152,639 @@ static int test_individual_fifo_pop_wait_empty_yields(void)
 }
 
 
+
+
+/*
+ * ======================================================================
+ * Real pthread concurrency tests
+ * ======================================================================
+ *
+ * These deliberately exercise libfifo with real concurrent execution.
+ * The same core scenarios are run with one, two, and multiple worker
+ * threads where that distinction is meaningful.
+ */
+
+#define THREAD_TEST_ONE       1U
+#define THREAD_TEST_TWO       2U
+#define THREAD_TEST_MULTIPLE  8U
+#define THREAD_TEST_ITERS     2000U
+
+static int pthread_start_many(pthread_t *threads, size_t count,
+                              void *(*entry)(void *), void *args,
+                              size_t arg_size)
+{
+    size_t i;
+
+    for (i = 0; i < count; i++) {
+        void *arg = (char *)args + i * arg_size;
+
+        if (pthread_create(&threads[i], NULL, entry, arg) != 0) {
+            while (i != 0) {
+                i--;
+                pthread_join(threads[i], NULL);
+            }
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+static int pthread_join_many(pthread_t *threads, size_t count)
+{
+    int failed = 0;
+
+    for (size_t i = 0; i < count; i++) {
+        if (pthread_join(threads[i], NULL) != 0)
+            failed = 1;
+    }
+
+    return failed ? -1 : 0;
+}
+
+
+/* Spinlock: real mutual exclusion under 1 / 2 / many threads. */
+
+struct pthread_lock_counter_arg {
+    fifo_spinlock_t *spinlock;
+    fifo_mutex_t *mutex;
+    size_t *counter;
+    size_t iterations;
+};
+
+static void *pthread_spinlock_counter_worker(void *opaque)
+{
+    struct pthread_lock_counter_arg *arg = opaque;
+
+    for (size_t i = 0; i < arg->iterations; i++) {
+        fifo_spinlock_lock(arg->spinlock);
+        (*arg->counter)++;
+        fifo_spinlock_unlock(arg->spinlock);
+    }
+
+    return NULL;
+}
+
+static int run_pthread_spinlock_counter(size_t thread_count)
+{
+    pthread_t threads[THREAD_TEST_MULTIPLE];
+    struct pthread_lock_counter_arg args[THREAD_TEST_MULTIPLE];
+    fifo_spinlock_t lock;
+    size_t counter = 0;
+
+    fifo_spinlock_init(&lock);
+
+    for (size_t i = 0; i < thread_count; i++) {
+        args[i].spinlock = &lock;
+        args[i].mutex = NULL;
+        args[i].counter = &counter;
+        args[i].iterations = THREAD_TEST_ITERS;
+    }
+
+    ASSERT("spinlock worker threads must start",
+           pthread_start_many(threads, thread_count,
+                              pthread_spinlock_counter_worker,
+                              args, sizeof(args[0])) == 0);
+    ASSERT("spinlock worker threads must join",
+           pthread_join_many(threads, thread_count) == 0);
+    ASSERT("spinlock must preserve every protected increment",
+           counter == thread_count * THREAD_TEST_ITERS);
+
+    return 0;
+}
+
+static int test_pthread_spinlock_one(void)
+{
+    return run_pthread_spinlock_counter(THREAD_TEST_ONE);
+}
+
+static int test_pthread_spinlock_two(void)
+{
+    return run_pthread_spinlock_counter(THREAD_TEST_TWO);
+}
+
+static int test_pthread_spinlock_multiple(void)
+{
+    return run_pthread_spinlock_counter(THREAD_TEST_MULTIPLE);
+}
+
+
+/* Mutex: real mutual exclusion under 1 / 2 / many threads. */
+
+static void *pthread_mutex_counter_worker(void *opaque)
+{
+    struct pthread_lock_counter_arg *arg = opaque;
+
+    for (size_t i = 0; i < arg->iterations; i++) {
+        fifo_mutex_lock(arg->mutex);
+        (*arg->counter)++;
+        fifo_mutex_unlock(arg->mutex);
+    }
+
+    return NULL;
+}
+
+static int run_pthread_mutex_counter(size_t thread_count)
+{
+    pthread_t threads[THREAD_TEST_MULTIPLE];
+    struct pthread_lock_counter_arg args[THREAD_TEST_MULTIPLE];
+    fifo_mutex_t mutex;
+    size_t counter = 0;
+
+    fifo_mutex_init(&mutex);
+
+    for (size_t i = 0; i < thread_count; i++) {
+        args[i].spinlock = NULL;
+        args[i].mutex = &mutex;
+        args[i].counter = &counter;
+        args[i].iterations = THREAD_TEST_ITERS;
+    }
+
+    ASSERT("mutex worker threads must start",
+           pthread_start_many(threads, thread_count,
+                              pthread_mutex_counter_worker,
+                              args, sizeof(args[0])) == 0);
+    ASSERT("mutex worker threads must join",
+           pthread_join_many(threads, thread_count) == 0);
+    ASSERT("mutex must preserve every protected increment",
+           counter == thread_count * THREAD_TEST_ITERS);
+
+    return 0;
+}
+
+static int test_pthread_mutex_one(void)
+{
+    return run_pthread_mutex_counter(THREAD_TEST_ONE);
+}
+
+static int test_pthread_mutex_two(void)
+{
+    return run_pthread_mutex_counter(THREAD_TEST_TWO);
+}
+
+static int test_pthread_mutex_multiple(void)
+{
+    return run_pthread_mutex_counter(THREAD_TEST_MULTIPLE);
+}
+
+
+/* Semaphore: concurrent post/trywait and blocking wait. */
+
+struct pthread_semaphore_arg {
+    fifo_semaphore_t *semaphore;
+    atomic_size_t *completed;
+    size_t iterations;
+};
+
+static void *pthread_semaphore_post_worker(void *opaque)
+{
+    struct pthread_semaphore_arg *arg = opaque;
+
+    for (size_t i = 0; i < arg->iterations; i++)
+        fifo_semaphore_post(arg->semaphore);
+
+    atomic_fetch_add_explicit(arg->completed, 1, memory_order_relaxed);
+    return NULL;
+}
+
+static void *pthread_semaphore_wait_worker(void *opaque)
+{
+    struct pthread_semaphore_arg *arg = opaque;
+
+    for (size_t i = 0; i < arg->iterations; i++)
+        fifo_semaphore_wait(arg->semaphore);
+
+    atomic_fetch_add_explicit(arg->completed, 1, memory_order_relaxed);
+    return NULL;
+}
+
+static int run_pthread_semaphore_posts(size_t thread_count)
+{
+    pthread_t threads[THREAD_TEST_MULTIPLE];
+    struct pthread_semaphore_arg args[THREAD_TEST_MULTIPLE];
+    fifo_semaphore_t semaphore;
+    atomic_size_t completed;
+    size_t expected;
+
+    fifo_semaphore_init(&semaphore, 0);
+    atomic_init(&completed, 0);
+
+    for (size_t i = 0; i < thread_count; i++) {
+        args[i].semaphore = &semaphore;
+        args[i].completed = &completed;
+        args[i].iterations = THREAD_TEST_ITERS;
+    }
+
+    ASSERT("semaphore posting threads must start",
+           pthread_start_many(threads, thread_count,
+                              pthread_semaphore_post_worker,
+                              args, sizeof(args[0])) == 0);
+    ASSERT("semaphore posting threads must join",
+           pthread_join_many(threads, thread_count) == 0);
+
+    expected = thread_count * THREAD_TEST_ITERS;
+    ASSERT("all semaphore posting threads must complete",
+           atomic_load_explicit(&completed, memory_order_relaxed) ==
+           thread_count);
+    ASSERT("concurrent semaphore posts must all accumulate",
+           atomic_load_explicit(&semaphore.count, memory_order_relaxed) ==
+           expected);
+
+    for (size_t i = 0; i < expected; i++) {
+        ASSERT("every concurrently posted semaphore unit must be consumable",
+               fifo_semaphore_trywait(&semaphore));
+    }
+
+    ASSERT("semaphore must be empty after consuming all posted units",
+           !fifo_semaphore_trywait(&semaphore));
+
+    return 0;
+}
+
+static int test_pthread_semaphore_posts_one(void)
+{
+    return run_pthread_semaphore_posts(THREAD_TEST_ONE);
+}
+
+static int test_pthread_semaphore_posts_two(void)
+{
+    return run_pthread_semaphore_posts(THREAD_TEST_TWO);
+}
+
+static int test_pthread_semaphore_posts_multiple(void)
+{
+    return run_pthread_semaphore_posts(THREAD_TEST_MULTIPLE);
+}
+
+static int run_pthread_semaphore_waiters(size_t thread_count)
+{
+    pthread_t threads[THREAD_TEST_MULTIPLE];
+    struct pthread_semaphore_arg args[THREAD_TEST_MULTIPLE];
+    fifo_semaphore_t semaphore;
+    atomic_size_t completed;
+
+    fifo_semaphore_init(&semaphore, 0);
+    atomic_init(&completed, 0);
+
+    for (size_t i = 0; i < thread_count; i++) {
+        args[i].semaphore = &semaphore;
+        args[i].completed = &completed;
+        args[i].iterations = 1;
+    }
+
+    ASSERT("semaphore waiter threads must start",
+           pthread_start_many(threads, thread_count,
+                              pthread_semaphore_wait_worker,
+                              args, sizeof(args[0])) == 0);
+
+    for (size_t i = 0; i < thread_count; i++)
+        fifo_semaphore_post(&semaphore);
+
+    ASSERT("semaphore waiter threads must join",
+           pthread_join_many(threads, thread_count) == 0);
+    ASSERT("every semaphore waiter must complete",
+           atomic_load_explicit(&completed, memory_order_relaxed) ==
+           thread_count);
+    ASSERT("waiters must consume exactly the posted semaphore units",
+           atomic_load_explicit(&semaphore.count, memory_order_relaxed) == 0);
+
+    return 0;
+}
+
+static int test_pthread_semaphore_waiters_one(void)
+{
+    return run_pthread_semaphore_waiters(THREAD_TEST_ONE);
+}
+
+static int test_pthread_semaphore_waiters_two(void)
+{
+    return run_pthread_semaphore_waiters(THREAD_TEST_TWO);
+}
+
+static int test_pthread_semaphore_waiters_multiple(void)
+{
+    return run_pthread_semaphore_waiters(THREAD_TEST_MULTIPLE);
+}
+
+
+/* Condition variables: real waiter/signal/broadcast interaction. */
+
+struct pthread_condition_arg {
+    fifo_condition_t *condition;
+    fifo_mutex_t *mutex;
+    atomic_size_t *ready;
+    atomic_size_t *completed;
+};
+
+static void *pthread_condition_waiter(void *opaque)
+{
+    struct pthread_condition_arg *arg = opaque;
+
+    fifo_mutex_lock(arg->mutex);
+    atomic_fetch_add_explicit(arg->ready, 1, memory_order_release);
+    fifo_condition_wait(arg->condition, arg->mutex);
+    atomic_fetch_add_explicit(arg->completed, 1, memory_order_release);
+    fifo_mutex_unlock(arg->mutex);
+
+    return NULL;
+}
+
+static void pthread_wait_until_count(atomic_size_t *value, size_t expected)
+{
+    while (atomic_load_explicit(value, memory_order_acquire) < expected)
+        sched_yield();
+}
+
+static int run_pthread_condition_broadcast(size_t thread_count)
+{
+    pthread_t threads[THREAD_TEST_MULTIPLE];
+    struct pthread_condition_arg args[THREAD_TEST_MULTIPLE];
+    fifo_condition_t condition;
+    fifo_mutex_t mutex;
+    atomic_size_t ready;
+    atomic_size_t completed;
+
+    fifo_condition_init(&condition);
+    fifo_mutex_init(&mutex);
+    atomic_init(&ready, 0);
+    atomic_init(&completed, 0);
+
+    for (size_t i = 0; i < thread_count; i++) {
+        args[i].condition = &condition;
+        args[i].mutex = &mutex;
+        args[i].ready = &ready;
+        args[i].completed = &completed;
+    }
+
+    ASSERT("condition waiter threads must start",
+           pthread_start_many(threads, thread_count,
+                              pthread_condition_waiter,
+                              args, sizeof(args[0])) == 0);
+
+    pthread_wait_until_count(&ready, thread_count);
+    fifo_condition_broadcast(&condition);
+
+    ASSERT("broadcast waiter threads must join",
+           pthread_join_many(threads, thread_count) == 0);
+    ASSERT("broadcast must release every waiter",
+           atomic_load_explicit(&completed, memory_order_acquire) ==
+           thread_count);
+
+    return 0;
+}
+
+static int test_pthread_condition_broadcast_one(void)
+{
+    return run_pthread_condition_broadcast(THREAD_TEST_ONE);
+}
+
+static int test_pthread_condition_broadcast_two(void)
+{
+    return run_pthread_condition_broadcast(THREAD_TEST_TWO);
+}
+
+static int test_pthread_condition_broadcast_multiple(void)
+{
+    return run_pthread_condition_broadcast(THREAD_TEST_MULTIPLE);
+}
+
+static int test_pthread_condition_signal_one(void)
+{
+    pthread_t thread;
+    struct pthread_condition_arg arg;
+    fifo_condition_t condition;
+    fifo_mutex_t mutex;
+    atomic_size_t ready;
+    atomic_size_t completed;
+
+    fifo_condition_init(&condition);
+    fifo_mutex_init(&mutex);
+    atomic_init(&ready, 0);
+    atomic_init(&completed, 0);
+
+    arg.condition = &condition;
+    arg.mutex = &mutex;
+    arg.ready = &ready;
+    arg.completed = &completed;
+
+    ASSERT("single condition waiter must start",
+           pthread_create(&thread, NULL, pthread_condition_waiter, &arg) == 0);
+
+    pthread_wait_until_count(&ready, 1);
+    fifo_condition_signal(&condition);
+
+    ASSERT("single condition waiter must join",
+           pthread_join(thread, NULL) == 0);
+    ASSERT("signal must release the single waiter",
+           atomic_load_explicit(&completed, memory_order_acquire) == 1);
+
+    return 0;
+}
+
+/*
+ * With more than one waiter, signal is required to release one waiter, not
+ * every waiter.  After observing the signal result, broadcast releases the
+ * remainder so the test can always join cleanly.
+ */
+static int run_pthread_condition_signal_one_of_many(size_t thread_count)
+{
+    pthread_t threads[THREAD_TEST_MULTIPLE];
+    struct pthread_condition_arg args[THREAD_TEST_MULTIPLE];
+    fifo_condition_t condition;
+    fifo_mutex_t mutex;
+    atomic_size_t ready;
+    atomic_size_t completed;
+    size_t observed;
+
+    fifo_condition_init(&condition);
+    fifo_mutex_init(&mutex);
+    atomic_init(&ready, 0);
+    atomic_init(&completed, 0);
+
+    for (size_t i = 0; i < thread_count; i++) {
+        args[i].condition = &condition;
+        args[i].mutex = &mutex;
+        args[i].ready = &ready;
+        args[i].completed = &completed;
+    }
+
+    ASSERT("condition waiter threads must start",
+           pthread_start_many(threads, thread_count,
+                              pthread_condition_waiter,
+                              args, sizeof(args[0])) == 0);
+
+    pthread_wait_until_count(&ready, thread_count);
+    fifo_condition_signal(&condition);
+
+    /*
+     * Give all threads made runnable by the signal ample opportunity to
+     * complete before measuring.  This is deliberately not a correctness
+     * timeout; it only exposes an over-broad wakeup before cleanup.
+     */
+    for (size_t i = 0; i < 10000; i++)
+        sched_yield();
+
+    observed = atomic_load_explicit(&completed, memory_order_acquire);
+
+    fifo_condition_broadcast(&condition);
+
+    ASSERT("condition waiter threads must join after cleanup broadcast",
+           pthread_join_many(threads, thread_count) == 0);
+    ASSERT("signal with multiple waiters must release exactly one waiter",
+           observed == 1);
+    ASSERT("cleanup broadcast must release all remaining waiters",
+           atomic_load_explicit(&completed, memory_order_acquire) ==
+           thread_count);
+
+    return 0;
+}
+
+static int test_pthread_condition_signal_two(void)
+{
+    return run_pthread_condition_signal_one_of_many(THREAD_TEST_TWO);
+}
+
+static int test_pthread_condition_signal_multiple(void)
+{
+    return run_pthread_condition_signal_one_of_many(THREAD_TEST_MULTIPLE);
+}
+
+
+/* FIFO: real producer/consumer tests with 1 / 2 / many producers and consumers. */
+
+struct pthread_fifo_producer_arg {
+    fifo_t *fifo;
+    uintptr_t base;
+    size_t count;
+};
+
+struct pthread_fifo_consumer_arg {
+    fifo_t *fifo;
+    size_t count;
+    atomic_size_t *consumed;
+    atomic_uintptr_t *sum;
+};
+
+static void *pthread_fifo_producer(void *opaque)
+{
+    struct pthread_fifo_producer_arg *arg = opaque;
+
+    for (size_t i = 0; i < arg->count; i++)
+        fifo_push_wait(arg->fifo, (void *)(arg->base + i));
+
+    return NULL;
+}
+
+static void *pthread_fifo_consumer(void *opaque)
+{
+    struct pthread_fifo_consumer_arg *arg = opaque;
+
+    for (size_t i = 0; i < arg->count; i++) {
+        uintptr_t value = (uintptr_t)fifo_pop_wait(arg->fifo);
+
+        atomic_fetch_add_explicit(arg->sum, value, memory_order_relaxed);
+        atomic_fetch_add_explicit(arg->consumed, 1, memory_order_relaxed);
+    }
+
+    return NULL;
+}
+
+static int run_pthread_fifo_producer_consumer(size_t producer_count,
+                                               size_t consumer_count)
+{
+    enum { ITEMS_PER_PRODUCER = 256, FIFO_CAPACITY = 7 };
+    pthread_t producers[THREAD_TEST_MULTIPLE];
+    pthread_t consumers[THREAD_TEST_MULTIPLE];
+    struct pthread_fifo_producer_arg producer_args[THREAD_TEST_MULTIPLE];
+    struct pthread_fifo_consumer_arg consumer_args[THREAD_TEST_MULTIPLE];
+    void *storage[FIFO_CAPACITY];
+    fifo_t fifo;
+    atomic_size_t consumed;
+    atomic_uintptr_t sum;
+    size_t total_items = producer_count * ITEMS_PER_PRODUCER;
+    size_t base_consume = total_items / consumer_count;
+    size_t consume_remainder = total_items % consumer_count;
+    uintptr_t expected_sum = 0;
+
+    fifo_init(&fifo, storage, FIFO_CAPACITY);
+    atomic_init(&consumed, 0);
+    atomic_init(&sum, 0);
+
+    for (size_t p = 0; p < producer_count; p++) {
+        uintptr_t base = p * ITEMS_PER_PRODUCER + 1;
+
+        producer_args[p].fifo = &fifo;
+        producer_args[p].base = base;
+        producer_args[p].count = ITEMS_PER_PRODUCER;
+
+        for (size_t i = 0; i < ITEMS_PER_PRODUCER; i++)
+            expected_sum += base + i;
+    }
+
+    for (size_t c = 0; c < consumer_count; c++) {
+        consumer_args[c].fifo = &fifo;
+        consumer_args[c].count =
+            base_consume + (c < consume_remainder ? 1 : 0);
+        consumer_args[c].consumed = &consumed;
+        consumer_args[c].sum = &sum;
+    }
+
+    ASSERT("FIFO consumer threads must start",
+           pthread_start_many(consumers, consumer_count,
+                              pthread_fifo_consumer,
+                              consumer_args, sizeof(consumer_args[0])) == 0);
+    ASSERT("FIFO producer threads must start",
+           pthread_start_many(producers, producer_count,
+                              pthread_fifo_producer,
+                              producer_args, sizeof(producer_args[0])) == 0);
+
+    ASSERT("FIFO producer threads must join",
+           pthread_join_many(producers, producer_count) == 0);
+    ASSERT("FIFO consumer threads must join",
+           pthread_join_many(consumers, consumer_count) == 0);
+
+    ASSERT("FIFO consumers must receive every produced item",
+           atomic_load_explicit(&consumed, memory_order_relaxed) ==
+           total_items);
+    ASSERT("FIFO consumers must receive exactly the produced values",
+           atomic_load_explicit(&sum, memory_order_relaxed) == expected_sum);
+    ASSERT("FIFO must be empty after balanced producer/consumer run",
+           fifo_count(&fifo) == 0);
+
+    return 0;
+}
+
+static int test_pthread_fifo_one_to_one(void)
+{
+    return run_pthread_fifo_producer_consumer(THREAD_TEST_ONE,
+                                              THREAD_TEST_ONE);
+}
+
+static int test_pthread_fifo_two_to_one(void)
+{
+    return run_pthread_fifo_producer_consumer(THREAD_TEST_TWO,
+                                              THREAD_TEST_ONE);
+}
+
+static int test_pthread_fifo_one_to_two(void)
+{
+    return run_pthread_fifo_producer_consumer(THREAD_TEST_ONE,
+                                              THREAD_TEST_TWO);
+}
+
+static int test_pthread_fifo_two_to_two(void)
+{
+    return run_pthread_fifo_producer_consumer(THREAD_TEST_TWO,
+                                              THREAD_TEST_TWO);
+}
+
+static int test_pthread_fifo_multiple_to_multiple(void)
+{
+    return run_pthread_fifo_producer_consumer(THREAD_TEST_MULTIPLE,
+                                              THREAD_TEST_MULTIPLE);
+}
+
+
 int main(int argc, char **argv)
 {
     int passed_tests = 0;
@@ -4348,6 +4983,37 @@ int main(int argc, char **argv)
     TEST("condition_wait calls platform yield",                test_individual_condition_wait_yields)
     TEST("full fifo_push_wait calls platform yield",           test_individual_fifo_push_wait_full_yields)
     TEST("empty fifo_pop_wait calls platform yield",           test_individual_fifo_pop_wait_empty_yields)
+
+    fprintf(stdout, "\nReal pthread concurrency tests\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+
+    TEST("Spinlock mutual exclusion - single thread",          test_pthread_spinlock_one)
+    TEST("Spinlock mutual exclusion - two threads",            test_pthread_spinlock_two)
+    TEST("Spinlock mutual exclusion - multiple threads",       test_pthread_spinlock_multiple)
+
+    TEST("Mutex mutual exclusion - single thread",             test_pthread_mutex_one)
+    TEST("Mutex mutual exclusion - two threads",               test_pthread_mutex_two)
+    TEST("Mutex mutual exclusion - multiple threads",          test_pthread_mutex_multiple)
+
+    TEST("Semaphore concurrent posts - single thread",         test_pthread_semaphore_posts_one)
+    TEST("Semaphore concurrent posts - two threads",           test_pthread_semaphore_posts_two)
+    TEST("Semaphore concurrent posts - multiple threads",      test_pthread_semaphore_posts_multiple)
+    TEST("Semaphore blocking wait - single waiter",            test_pthread_semaphore_waiters_one)
+    TEST("Semaphore blocking wait - two waiters",              test_pthread_semaphore_waiters_two)
+    TEST("Semaphore blocking wait - multiple waiters",         test_pthread_semaphore_waiters_multiple)
+
+    TEST("Condition signal - single waiter",                   test_pthread_condition_signal_one)
+    TEST("Condition signal - two waiters",                     test_pthread_condition_signal_two)
+    TEST("Condition signal - multiple waiters",                test_pthread_condition_signal_multiple)
+    TEST("Condition broadcast - single waiter",                test_pthread_condition_broadcast_one)
+    TEST("Condition broadcast - two waiters",                  test_pthread_condition_broadcast_two)
+    TEST("Condition broadcast - multiple waiters",             test_pthread_condition_broadcast_multiple)
+
+    TEST("FIFO producer/consumer - one to one",                test_pthread_fifo_one_to_one)
+    TEST("FIFO producer/consumer - two producers",             test_pthread_fifo_two_to_one)
+    TEST("FIFO producer/consumer - two consumers",             test_pthread_fifo_one_to_two)
+    TEST("FIFO producer/consumer - two to two",                test_pthread_fifo_two_to_two)
+    TEST("FIFO producer/consumer - multiple to multiple",      test_pthread_fifo_multiple_to_multiple)
 
     fprintf(stdout, "\nSpinlocks\n");
     fprintf(stdout, "----------------------------------------------------------------------\n");

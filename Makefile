@@ -27,11 +27,11 @@ $(BUILD)/fifo/%.o: src/fifo/%.c
 
 $(TEST): tests/test-fifo.c $(LIBFIFO)
 	@mkdir -p $(@D)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LIBFIFO) -o $@
+	$(CC) $(CPPFLAGS) -pthread $(CFLAGS) $< $(LIBFIFO) -o $@
 
 $(TEST_GDB): tests/test-fifo.c $(LIBFIFO)
 	@mkdir -p $(@D)
-	$(CC) $(CPPFLAGS) -DTEST_GDB -O0 -g3 \
+	$(CC) $(CPPFLAGS) -pthread -DTEST_GDB -O0 -g3 \
 		-Wall -Wextra -Wpedantic \
 		$< $(LIBFIFO) -o $@
 
