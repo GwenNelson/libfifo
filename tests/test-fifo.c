@@ -3152,7 +3152,6 @@ static int test_individual_fifo_capacity_wrapped(void)
 
 /* fifo_count() */
 
-
 static int test_individual_fifo_count_empty(void)
 {
     void *storage[8];
@@ -3163,6 +3162,7 @@ static int test_individual_fifo_count_empty(void)
     fifo.head = 0;
     fifo.tail = 0;
     fifo.count = 0;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
 
     ASSERT("fifo_count must report zero for empty FIFO",
            fifo_count(&fifo) == 0);
@@ -3173,6 +3173,7 @@ static int test_individual_fifo_count_empty(void)
            fifo_count(&fifo) == 5);
     return 0;
 }
+
 
 
 static int test_individual_fifo_count_partial(void)
@@ -3258,7 +3259,6 @@ static int test_individual_fifo_count_failed_push(void)
     return 0;
 }
 
-
 static int test_individual_fifo_count_failed_pop(void)
 {
     void *storage[8];
@@ -3269,6 +3269,7 @@ static int test_individual_fifo_count_failed_pop(void)
     fifo.head = 4;
     fifo.tail = 4;
     fifo.count = 0;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
 
     ASSERT("fifo_count must report preserved zero count",
            fifo_count(&fifo) == 0);
@@ -3279,7 +3280,6 @@ static int test_individual_fifo_count_failed_pop(void)
            fifo_count(&fifo) == 3);
     return 0;
 }
-
 
 static int test_individual_fifo_count_wrapped(void)
 {
