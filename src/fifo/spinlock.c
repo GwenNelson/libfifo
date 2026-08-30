@@ -23,7 +23,11 @@ void fifo_spinlock_init(fifo_spinlock_t *lock) {
 }
 
 void fifo_spinlock_lock(fifo_spinlock_t *lock) {
-    while (atomic_flag_test_and_set_explicit(&lock->locked, memory_order_acquire));
+    while (atomic_flag_test_and_set_explicit(&lock->locked, memory_order_acquire)) {
+#if defined(__i386__) || defined(__x86_64__)
+    __asm__ volatile ("pause");
+#endif
+    }
 }
 
 bool fifo_spinlock_trylock(fifo_spinlock_t *lock) {
