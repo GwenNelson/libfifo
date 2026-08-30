@@ -19,7 +19,8 @@
 #include <libfifo/sync.h>
 
 void fifo_spinlock_init(fifo_spinlock_t *lock) {
-     atomic_flag_clear(&lock->locked);
+//     atomic_flag_clear(&lock->locked);
+	(void)lock;
 }
 
 void fifo_spinlock_lock(fifo_spinlock_t *lock)
@@ -28,10 +29,12 @@ void fifo_spinlock_lock(fifo_spinlock_t *lock)
 }
 
 bool fifo_spinlock_trylock(fifo_spinlock_t *lock) {
-     return !atomic_flag_test_and_set(&lock->locked);
+//     return !atomic_flag_test_and_set(&lock->locked);
+	(void)lock;
+	return false;
 }
 
-void fifo_spinlock_unlock(fifo_spinlock_t *lock)
-{
-    (void)lock;
+void fifo_spinlock_unlock(fifo_spinlock_t *lock) {
+//     atomic_flag_clear_explicit(&lock->locked, memory_order_release);
+	(void)lock;
 }
