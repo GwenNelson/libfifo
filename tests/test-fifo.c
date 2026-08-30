@@ -57,18 +57,18 @@ static const char *failed_assert = NULL;
         int result;                                                       \
                                                                           \
         failed_assert = NULL;                                             \
-        fprintf(stderr, "Testing: %-58s", desc);                          \
+        fprintf(stdout, "Testing: %-58s", desc);                          \
         result = (f)();                                                   \
                                                                           \
         if (result == 0) {                                                \
             passed_tests++;                                               \
-            fprintf(stderr, "PASS\n");                                    \
+            fprintf(stdout, "PASS\n");                                    \
         } else {                                                          \
             failed_tests++;                                               \
-            fprintf(stderr, "FAIL");                                      \
+            fprintf(stdout, "FAIL");                                      \
             if (failed_assert != NULL)                                    \
-                fprintf(stderr, "  -  %s", failed_assert);                \
-            fprintf(stderr, "\n");                                        \
+                fprintf(stdout, "  -  %s", failed_assert);                \
+            fprintf(stdout, "\n");                                        \
         }                                                                 \
                                                                           \
         total_tests++;                                                    \
@@ -3662,12 +3662,182 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    fprintf(stderr, "\n");
-    fprintf(stderr, "libfifo test suite\n");
-    fprintf(stderr, "======================================================================\n\n");
+    fprintf(stdout, "\n");
+    fprintf(stdout, "libfifo test suite\n");
+    fprintf(stdout, "======================================================================\n\n");
 
-    fprintf(stderr, "Spinlocks\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
+   fprintf(stdout, "======================================================================\n");
+    fprintf(stdout, "Individual function exhaustive tests\n");
+    fprintf(stdout, "======================================================================\n");
+
+    fprintf(stdout, "\nfifo_spinlock_init()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("spinlock_init produces lockable state",           test_individual_spinlock_init_lockable)
+    TEST("spinlock_init instances are independent",         test_individual_spinlock_init_independent)
+
+    fprintf(stdout, "\nfifo_spinlock_trylock()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("spinlock_trylock succeeds when unlocked",         test_individual_spinlock_trylock_unlocked)
+    TEST("spinlock_trylock fails when held",                test_individual_spinlock_trylock_held)
+    TEST("spinlock_trylock succeeds after unlock",          test_individual_spinlock_trylock_after_unlock)
+
+    fprintf(stdout, "\nfifo_spinlock_lock()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("spinlock_lock acquires unlocked lock",            test_individual_spinlock_lock_unlocked)
+    TEST("spinlock_lock remains reusable",                  test_individual_spinlock_lock_reusable)
+
+    fprintf(stdout, "\nfifo_spinlock_unlock()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("spinlock_unlock releases trylocked lock",         test_individual_spinlock_unlock_trylocked)
+    TEST("spinlock_unlock releases blocking lock",          test_individual_spinlock_unlock_locked)
+
+    fprintf(stdout, "\nfifo_mutex_init()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("mutex_init produces lockable state",              test_individual_mutex_init_lockable)
+    TEST("mutex_init instances are independent",            test_individual_mutex_init_independent)
+
+    fprintf(stdout, "\nfifo_mutex_trylock()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("mutex_trylock succeeds when unlocked",            test_individual_mutex_trylock_unlocked)
+    TEST("mutex_trylock fails when held",                   test_individual_mutex_trylock_held)
+    TEST("mutex_trylock succeeds after unlock",             test_individual_mutex_trylock_after_unlock)
+
+    fprintf(stdout, "\nfifo_mutex_lock()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("mutex_lock acquires unlocked mutex",              test_individual_mutex_lock_unlocked)
+    TEST("mutex_lock remains reusable",                     test_individual_mutex_lock_reusable)
+
+    fprintf(stdout, "\nfifo_mutex_unlock()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("mutex_unlock releases trylocked mutex",           test_individual_mutex_unlock_trylocked)
+    TEST("mutex_unlock releases blocking mutex",            test_individual_mutex_unlock_locked)
+
+    fprintf(stdout, "\nfifo_semaphore_init()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("semaphore_init handles zero count",               test_individual_semaphore_init_zero)
+    TEST("semaphore_init handles count one",                test_individual_semaphore_init_one)
+    TEST("semaphore_init handles large count",              test_individual_semaphore_init_many)
+
+    fprintf(stdout, "\nfifo_semaphore_trywait()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("semaphore_trywait fails at zero",                 test_individual_semaphore_trywait_empty)
+    TEST("semaphore_trywait consumes one",                  test_individual_semaphore_trywait_single)
+    TEST("semaphore_trywait consumes many exactly",         test_individual_semaphore_trywait_many)
+    TEST("semaphore_trywait works after post",              test_individual_semaphore_trywait_after_post)
+
+    fprintf(stdout, "\nfifo_semaphore_wait()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("semaphore_wait consumes count one",               test_individual_semaphore_wait_one)
+    TEST("semaphore_wait consumes exactly one of many",     test_individual_semaphore_wait_many)
+    TEST("semaphore_wait consumes posted unit",             test_individual_semaphore_wait_after_post)
+
+    fprintf(stdout, "\nfifo_semaphore_post()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("semaphore_post increments zero",                  test_individual_semaphore_post_zero)
+    TEST("semaphore_post increments nonzero",               test_individual_semaphore_post_nonzero)
+    TEST("semaphore_post accumulates repeatedly",           test_individual_semaphore_post_accumulates)
+    TEST("semaphore_post restores consumed count",          test_individual_semaphore_post_after_consumption)
+
+    fprintf(stdout, "\nfifo_condition_init()/signal()/broadcast()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("condition_init resets sequence",                  test_individual_condition_init_sequence)
+    TEST("condition_signal advances sequence",              test_individual_condition_signal_changes_sequence)
+    TEST("condition_signal advances every time",            test_individual_condition_signal_repeated)
+    TEST("condition_broadcast advances sequence",           test_individual_condition_broadcast_changes_sequence)
+    TEST("condition signal/broadcast both advance",         test_individual_condition_signal_broadcast_sequence)
+
+    fprintf(stdout, "\nfifo_init()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("fifo_init handles capacity one",                  test_individual_fifo_init_capacity_one)
+    TEST("fifo_init handles typical capacity",              test_individual_fifo_init_typical)
+    TEST("fifo_init handles odd capacity",                  test_individual_fifo_init_odd_capacity)
+    TEST("fifo_init resets nonempty FIFO on reinit",        test_individual_fifo_init_reinitialise_nonempty)
+
+    fprintf(stdout, "\nfifo_capacity()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("fifo_capacity is correct while empty",            test_individual_fifo_capacity_empty)
+    TEST("fifo_capacity is correct while partial",          test_individual_fifo_capacity_partial)
+    TEST("fifo_capacity is correct while full",             test_individual_fifo_capacity_full)
+    TEST("fifo_capacity survives wraparound",               test_individual_fifo_capacity_wrapped)
+
+    fprintf(stdout, "\nfifo_count()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("fifo_count reports empty",                        test_individual_fifo_count_empty)
+    TEST("fifo_count tracks partial fill",                  test_individual_fifo_count_partial)
+    TEST("fifo_count reports full capacity",                test_individual_fifo_count_full)
+    TEST("fifo_count decrements after pop",                 test_individual_fifo_count_after_pop)
+    TEST("fifo_count survives failed push",                 test_individual_fifo_count_failed_push)
+    TEST("fifo_count survives failed pop",                  test_individual_fifo_count_failed_pop)
+    TEST("fifo_count survives wraparound",                  test_individual_fifo_count_wrapped)
+
+    fprintf(stdout, "\nfifo_empty()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("fifo_empty reports initial empty",                test_individual_fifo_empty_initial)
+    TEST("fifo_empty rejects partial state",                test_individual_fifo_empty_partial)
+    TEST("fifo_empty rejects full state",                   test_individual_fifo_empty_full)
+    TEST("fifo_empty reports drained state",                test_individual_fifo_empty_after_drain)
+    TEST("fifo_empty treats NULL as an item",               test_individual_fifo_empty_null_item)
+
+    fprintf(stdout, "\nfifo_full()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("fifo_full rejects initial state",                 test_individual_fifo_full_initial)
+    TEST("fifo_full rejects partial state",                 test_individual_fifo_full_partial)
+    TEST("fifo_full reports exact capacity",                test_individual_fifo_full_exact)
+    TEST("fifo_full survives failed overflow",              test_individual_fifo_full_after_failed_push)
+    TEST("fifo_full clears after pop",                      test_individual_fifo_full_after_pop)
+    TEST("fifo_full handles capacity one",                  test_individual_fifo_full_capacity_one)
+    TEST("fifo_full restores after wrapped refill",         test_individual_fifo_full_after_wrap_refill)
+
+    fprintf(stdout, "\nfifo_push()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("fifo_push handles empty FIFO",                    test_individual_fifo_push_empty)
+    TEST("fifo_push handles partial FIFO",                  test_individual_fifo_push_partial)
+    TEST("fifo_push handles final legal slot",              test_individual_fifo_push_exact_capacity)
+    TEST("fifo_push fails cleanly when full",               test_individual_fifo_push_full_failure)
+    TEST("fifo_push accepts NULL",                          test_individual_fifo_push_null)
+    TEST("fifo_push reuses wrapped free slot",              test_individual_fifo_push_after_pop_wrap)
+    TEST("fifo_push handles capacity one",                  test_individual_fifo_push_capacity_one)
+
+    fprintf(stdout, "\nfifo_pop()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("fifo_pop fails cleanly when empty",               test_individual_fifo_pop_empty_failure)
+    TEST("fifo_pop handles sole item",                      test_individual_fifo_pop_single)
+    TEST("fifo_pop handles partial FIFO",                   test_individual_fifo_pop_partial)
+    TEST("fifo_pop handles full FIFO",                      test_individual_fifo_pop_full)
+    TEST("fifo_pop returns stored NULL",                    test_individual_fifo_pop_null)
+    TEST("fifo_pop handles wrapped FIFO",                   test_individual_fifo_pop_wrapped)
+    TEST("fifo_pop handles capacity-one reuse",             test_individual_fifo_pop_capacity_one_reuse)
+
+    fprintf(stdout, "\nfifo_peek()\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("fifo_peek fails cleanly when empty",              test_individual_fifo_peek_empty_failure)
+    TEST("fifo_peek handles sole item",                     test_individual_fifo_peek_single)
+    TEST("fifo_peek handles partial FIFO",                  test_individual_fifo_peek_partial)
+    TEST("fifo_peek handles full FIFO",                     test_individual_fifo_peek_full)
+    TEST("fifo_peek returns stored NULL",                   test_individual_fifo_peek_null)
+    TEST("fifo_peek handles wrapped FIFO",                  test_individual_fifo_peek_wrapped)
+    TEST("fifo_peek remains non-consuming repeatedly",      test_individual_fifo_peek_repeated)
+
+    fprintf(stdout, "\nfifo_push_wait() immediate states\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("fifo_push_wait handles empty FIFO",               test_individual_fifo_push_wait_empty)
+    TEST("fifo_push_wait handles partial FIFO",             test_individual_fifo_push_wait_partial)
+    TEST("fifo_push_wait fills last free slot",             test_individual_fifo_push_wait_last_slot)
+    TEST("fifo_push_wait accepts NULL",                     test_individual_fifo_push_wait_null)
+    TEST("fifo_push_wait handles wrapped free slot",        test_individual_fifo_push_wait_wrapped_space)
+
+    fprintf(stdout, "\nfifo_pop_wait() immediate states\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+    TEST("fifo_pop_wait handles sole item",                 test_individual_fifo_pop_wait_single)
+    TEST("fifo_pop_wait handles partial FIFO",              test_individual_fifo_pop_wait_partial)
+    TEST("fifo_pop_wait handles full FIFO",                 test_individual_fifo_pop_wait_full)
+    TEST("fifo_pop_wait returns stored NULL",               test_individual_fifo_pop_wait_null)
+    TEST("fifo_pop_wait handles wrapped FIFO",              test_individual_fifo_pop_wait_wrapped)
+
+    fprintf(stdout,"\n");
+
+    fprintf(stdout, "Spinlocks\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
 
     TEST("Initialised spinlock is unlocked",           test_spinlock_init_unlocked)
     TEST("Trylock fails on locked spinlock",           test_spinlock_trylock_locked)
@@ -3675,8 +3845,8 @@ int main(int argc, char **argv)
     TEST("Lock acquires spinlock",                     test_spinlock_lock)
     TEST("Repeated spinlock acquire/release",          test_spinlock_repeated)
 
-    fprintf(stderr, "\nMutexes\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
+    fprintf(stdout, "\nMutexes\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
 
     TEST("Initialised mutex is unlocked",              test_mutex_init_unlocked)
     TEST("Trylock fails on locked mutex",              test_mutex_trylock_locked)
@@ -3684,8 +3854,8 @@ int main(int argc, char **argv)
     TEST("Lock acquires mutex",                        test_mutex_lock)
     TEST("Repeated mutex acquire/release",             test_mutex_repeated)
 
-    fprintf(stderr, "\nSemaphores\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
+    fprintf(stdout, "\nSemaphores\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
 
     TEST("Zero-count semaphore rejects trywait",       test_semaphore_zero)
     TEST("Count-one semaphore accepts trywait",        test_semaphore_one)
@@ -3695,13 +3865,13 @@ int main(int argc, char **argv)
     TEST("Post restores consumed semaphore",           test_semaphore_post_consumed)
     TEST("Multiple semaphore posts accumulate",        test_semaphore_multiple_posts)
 
-    fprintf(stderr, "\nCondition variables\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
+    fprintf(stdout, "\nCondition variables\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
 
     TEST("Condition variable initialisation",          test_condition_init)
 
-    fprintf(stderr, "\nFIFO initialisation and state\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
+    fprintf(stdout, "\nFIFO initialisation and state\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
 
     TEST("FIFO stores capacity",                       test_fifo_capacity)
     TEST("FIFO initial count is zero",                 test_fifo_initial_count)
@@ -3709,8 +3879,8 @@ int main(int argc, char **argv)
     TEST("FIFO initially reports not full",            test_fifo_initial_not_full)
     TEST("FIFO supports capacity one",                 test_fifo_capacity_one)
 
-    fprintf(stderr, "\nFIFO push\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
+    fprintf(stdout, "\nFIFO push\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
 
     TEST("Push into empty FIFO succeeds",              test_fifo_push)
     TEST("Push increments FIFO count",                 test_fifo_push_increments_count)
@@ -3721,8 +3891,8 @@ int main(int argc, char **argv)
     TEST("Failed push preserves count",                test_fifo_failed_push_preserves_count)
     TEST("FIFO accepts NULL item",                     test_fifo_push_null)
 
-    fprintf(stderr, "\nFIFO peek\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
+    fprintf(stdout, "\nFIFO peek\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
 
     TEST("Peek on empty FIFO fails",                   test_fifo_peek_empty)
     TEST("Peek returns first item",                    test_fifo_peek)
@@ -3730,8 +3900,8 @@ int main(int argc, char **argv)
     TEST("Repeated peek does not consume",             test_fifo_repeated_peek)
     TEST("Peek distinguishes stored NULL",             test_fifo_peek_null_item)
 
-    fprintf(stderr, "\nFIFO pop\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
+    fprintf(stdout, "\nFIFO pop\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
 
     TEST("Pop on empty FIFO fails",                    test_fifo_pop_empty)
     TEST("Pop returns pushed item",                    test_fifo_pop)
@@ -3740,216 +3910,48 @@ int main(int argc, char **argv)
     TEST("Pop clears full state",                      test_fifo_pop_from_full_clears_full)
     TEST("Pop returns stored NULL item",               test_fifo_pop_null_item)
 
-    fprintf(stderr, "\nFIFO ordering\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
+    fprintf(stdout, "\nFIFO ordering\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
 
     TEST("Two items preserve FIFO ordering",           test_fifo_two_item_order)
     TEST("Many items preserve FIFO ordering",          test_fifo_many_item_order)
 
-    fprintf(stderr, "\nFIFO capacity-one edge cases\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
+    fprintf(stdout, "\nFIFO capacity-one edge cases\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
 
     TEST("Capacity-one FIFO becomes full",             test_fifo_one_push_full)
     TEST("Capacity-one FIFO rejects second push",      test_fifo_one_second_push_fails)
     TEST("Capacity-one FIFO survives repeated reuse",  test_fifo_one_reuse)
 
-    fprintf(stderr, "\nFIFO wraparound\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
+    fprintf(stdout, "\nFIFO wraparound\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
 
     TEST("FIFO survives single wraparound",            test_fifo_single_wraparound)
     TEST("FIFO survives repeated wraparound",          test_fifo_repeated_wraparound)
     TEST("FIFO survives interleaved wraparound",       test_fifo_interleaved_wraparound)
 
-    fprintf(stderr, "\nFIFO state transitions\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
+    fprintf(stdout, "\nFIFO state transitions\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
 
     TEST("FIFO transitions empty-full-empty",          test_fifo_empty_full_empty)
     TEST("FIFO count tracks every transition",         test_fifo_count_transitions)
     TEST("Failed empty pop preserves state",           test_fifo_failed_pop_preserves_state)
 
-    fprintf(stderr, "\nFIFO reuse\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
+    fprintf(stdout, "\nFIFO reuse\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
 
     TEST("FIFO can be reinitialised",                  test_fifo_reinitialise)
     TEST("FIFO survives repeated fill/drain",          test_fifo_reuse_after_drain)
 
 
-    fprintf(stderr, "\n");
-    fprintf(stderr, "======================================================================\n");
-    fprintf(stderr, "Individual function exhaustive tests\n");
-    fprintf(stderr, "======================================================================\n");
-
-    fprintf(stderr, "\nfifo_spinlock_init()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("spinlock_init produces lockable state",           test_individual_spinlock_init_lockable)
-    TEST("spinlock_init instances are independent",         test_individual_spinlock_init_independent)
-
-    fprintf(stderr, "\nfifo_spinlock_trylock()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("spinlock_trylock succeeds when unlocked",         test_individual_spinlock_trylock_unlocked)
-    TEST("spinlock_trylock fails when held",                test_individual_spinlock_trylock_held)
-    TEST("spinlock_trylock succeeds after unlock",          test_individual_spinlock_trylock_after_unlock)
-
-    fprintf(stderr, "\nfifo_spinlock_lock()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("spinlock_lock acquires unlocked lock",            test_individual_spinlock_lock_unlocked)
-    TEST("spinlock_lock remains reusable",                  test_individual_spinlock_lock_reusable)
-
-    fprintf(stderr, "\nfifo_spinlock_unlock()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("spinlock_unlock releases trylocked lock",         test_individual_spinlock_unlock_trylocked)
-    TEST("spinlock_unlock releases blocking lock",          test_individual_spinlock_unlock_locked)
-
-    fprintf(stderr, "\nfifo_mutex_init()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("mutex_init produces lockable state",              test_individual_mutex_init_lockable)
-    TEST("mutex_init instances are independent",            test_individual_mutex_init_independent)
-
-    fprintf(stderr, "\nfifo_mutex_trylock()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("mutex_trylock succeeds when unlocked",            test_individual_mutex_trylock_unlocked)
-    TEST("mutex_trylock fails when held",                   test_individual_mutex_trylock_held)
-    TEST("mutex_trylock succeeds after unlock",             test_individual_mutex_trylock_after_unlock)
-
-    fprintf(stderr, "\nfifo_mutex_lock()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("mutex_lock acquires unlocked mutex",              test_individual_mutex_lock_unlocked)
-    TEST("mutex_lock remains reusable",                     test_individual_mutex_lock_reusable)
-
-    fprintf(stderr, "\nfifo_mutex_unlock()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("mutex_unlock releases trylocked mutex",           test_individual_mutex_unlock_trylocked)
-    TEST("mutex_unlock releases blocking mutex",            test_individual_mutex_unlock_locked)
-
-    fprintf(stderr, "\nfifo_semaphore_init()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("semaphore_init handles zero count",               test_individual_semaphore_init_zero)
-    TEST("semaphore_init handles count one",                test_individual_semaphore_init_one)
-    TEST("semaphore_init handles large count",              test_individual_semaphore_init_many)
-
-    fprintf(stderr, "\nfifo_semaphore_trywait()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("semaphore_trywait fails at zero",                 test_individual_semaphore_trywait_empty)
-    TEST("semaphore_trywait consumes one",                  test_individual_semaphore_trywait_single)
-    TEST("semaphore_trywait consumes many exactly",         test_individual_semaphore_trywait_many)
-    TEST("semaphore_trywait works after post",              test_individual_semaphore_trywait_after_post)
-
-    fprintf(stderr, "\nfifo_semaphore_wait()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("semaphore_wait consumes count one",               test_individual_semaphore_wait_one)
-    TEST("semaphore_wait consumes exactly one of many",     test_individual_semaphore_wait_many)
-    TEST("semaphore_wait consumes posted unit",             test_individual_semaphore_wait_after_post)
-
-    fprintf(stderr, "\nfifo_semaphore_post()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("semaphore_post increments zero",                  test_individual_semaphore_post_zero)
-    TEST("semaphore_post increments nonzero",               test_individual_semaphore_post_nonzero)
-    TEST("semaphore_post accumulates repeatedly",           test_individual_semaphore_post_accumulates)
-    TEST("semaphore_post restores consumed count",          test_individual_semaphore_post_after_consumption)
-
-    fprintf(stderr, "\nfifo_condition_init()/signal()/broadcast()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("condition_init resets sequence",                  test_individual_condition_init_sequence)
-    TEST("condition_signal advances sequence",              test_individual_condition_signal_changes_sequence)
-    TEST("condition_signal advances every time",            test_individual_condition_signal_repeated)
-    TEST("condition_broadcast advances sequence",           test_individual_condition_broadcast_changes_sequence)
-    TEST("condition signal/broadcast both advance",         test_individual_condition_signal_broadcast_sequence)
-
-    fprintf(stderr, "\nfifo_init()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("fifo_init handles capacity one",                  test_individual_fifo_init_capacity_one)
-    TEST("fifo_init handles typical capacity",              test_individual_fifo_init_typical)
-    TEST("fifo_init handles odd capacity",                  test_individual_fifo_init_odd_capacity)
-    TEST("fifo_init resets nonempty FIFO on reinit",        test_individual_fifo_init_reinitialise_nonempty)
-
-    fprintf(stderr, "\nfifo_capacity()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("fifo_capacity is correct while empty",            test_individual_fifo_capacity_empty)
-    TEST("fifo_capacity is correct while partial",          test_individual_fifo_capacity_partial)
-    TEST("fifo_capacity is correct while full",             test_individual_fifo_capacity_full)
-    TEST("fifo_capacity survives wraparound",               test_individual_fifo_capacity_wrapped)
-
-    fprintf(stderr, "\nfifo_count()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("fifo_count reports empty",                        test_individual_fifo_count_empty)
-    TEST("fifo_count tracks partial fill",                  test_individual_fifo_count_partial)
-    TEST("fifo_count reports full capacity",                test_individual_fifo_count_full)
-    TEST("fifo_count decrements after pop",                 test_individual_fifo_count_after_pop)
-    TEST("fifo_count survives failed push",                 test_individual_fifo_count_failed_push)
-    TEST("fifo_count survives failed pop",                  test_individual_fifo_count_failed_pop)
-    TEST("fifo_count survives wraparound",                  test_individual_fifo_count_wrapped)
-
-    fprintf(stderr, "\nfifo_empty()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("fifo_empty reports initial empty",                test_individual_fifo_empty_initial)
-    TEST("fifo_empty rejects partial state",                test_individual_fifo_empty_partial)
-    TEST("fifo_empty rejects full state",                   test_individual_fifo_empty_full)
-    TEST("fifo_empty reports drained state",                test_individual_fifo_empty_after_drain)
-    TEST("fifo_empty treats NULL as an item",               test_individual_fifo_empty_null_item)
-
-    fprintf(stderr, "\nfifo_full()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("fifo_full rejects initial state",                 test_individual_fifo_full_initial)
-    TEST("fifo_full rejects partial state",                 test_individual_fifo_full_partial)
-    TEST("fifo_full reports exact capacity",                test_individual_fifo_full_exact)
-    TEST("fifo_full survives failed overflow",              test_individual_fifo_full_after_failed_push)
-    TEST("fifo_full clears after pop",                      test_individual_fifo_full_after_pop)
-    TEST("fifo_full handles capacity one",                  test_individual_fifo_full_capacity_one)
-    TEST("fifo_full restores after wrapped refill",         test_individual_fifo_full_after_wrap_refill)
-
-    fprintf(stderr, "\nfifo_push()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("fifo_push handles empty FIFO",                    test_individual_fifo_push_empty)
-    TEST("fifo_push handles partial FIFO",                  test_individual_fifo_push_partial)
-    TEST("fifo_push handles final legal slot",              test_individual_fifo_push_exact_capacity)
-    TEST("fifo_push fails cleanly when full",               test_individual_fifo_push_full_failure)
-    TEST("fifo_push accepts NULL",                          test_individual_fifo_push_null)
-    TEST("fifo_push reuses wrapped free slot",              test_individual_fifo_push_after_pop_wrap)
-    TEST("fifo_push handles capacity one",                  test_individual_fifo_push_capacity_one)
-
-    fprintf(stderr, "\nfifo_pop()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("fifo_pop fails cleanly when empty",               test_individual_fifo_pop_empty_failure)
-    TEST("fifo_pop handles sole item",                      test_individual_fifo_pop_single)
-    TEST("fifo_pop handles partial FIFO",                   test_individual_fifo_pop_partial)
-    TEST("fifo_pop handles full FIFO",                      test_individual_fifo_pop_full)
-    TEST("fifo_pop returns stored NULL",                    test_individual_fifo_pop_null)
-    TEST("fifo_pop handles wrapped FIFO",                   test_individual_fifo_pop_wrapped)
-    TEST("fifo_pop handles capacity-one reuse",             test_individual_fifo_pop_capacity_one_reuse)
-
-    fprintf(stderr, "\nfifo_peek()\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("fifo_peek fails cleanly when empty",              test_individual_fifo_peek_empty_failure)
-    TEST("fifo_peek handles sole item",                     test_individual_fifo_peek_single)
-    TEST("fifo_peek handles partial FIFO",                  test_individual_fifo_peek_partial)
-    TEST("fifo_peek handles full FIFO",                     test_individual_fifo_peek_full)
-    TEST("fifo_peek returns stored NULL",                   test_individual_fifo_peek_null)
-    TEST("fifo_peek handles wrapped FIFO",                  test_individual_fifo_peek_wrapped)
-    TEST("fifo_peek remains non-consuming repeatedly",      test_individual_fifo_peek_repeated)
-
-    fprintf(stderr, "\nfifo_push_wait() immediate states\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("fifo_push_wait handles empty FIFO",               test_individual_fifo_push_wait_empty)
-    TEST("fifo_push_wait handles partial FIFO",             test_individual_fifo_push_wait_partial)
-    TEST("fifo_push_wait fills last free slot",             test_individual_fifo_push_wait_last_slot)
-    TEST("fifo_push_wait accepts NULL",                     test_individual_fifo_push_wait_null)
-    TEST("fifo_push_wait handles wrapped free slot",        test_individual_fifo_push_wait_wrapped_space)
-
-    fprintf(stderr, "\nfifo_pop_wait() immediate states\n");
-    fprintf(stderr, "----------------------------------------------------------------------\n");
-    TEST("fifo_pop_wait handles sole item",                 test_individual_fifo_pop_wait_single)
-    TEST("fifo_pop_wait handles partial FIFO",              test_individual_fifo_pop_wait_partial)
-    TEST("fifo_pop_wait handles full FIFO",                 test_individual_fifo_pop_wait_full)
-    TEST("fifo_pop_wait returns stored NULL",               test_individual_fifo_pop_wait_null)
-    TEST("fifo_pop_wait handles wrapped FIFO",              test_individual_fifo_pop_wait_wrapped)
-
-    fprintf(stderr, "\n");
-    fprintf(stderr, "======================================================================\n");
-    fprintf(stderr, "Tests: %-4d  Passed: %-4d  Failed: %-4d\n",
+ 
+    fprintf(stdout, "\n");
+    fprintf(stdout, "======================================================================\n");
+    fprintf(stdout, "Tests: %-4d  Passed: %-4d  Failed: %-4d\n",
             total_tests,
             passed_tests,
             failed_tests);
-    fprintf(stderr, "======================================================================\n");
+    fprintf(stdout, "======================================================================\n");
 
     return failed_tests > 0 ? 1 : 0;
 }
