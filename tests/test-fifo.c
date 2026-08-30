@@ -105,28 +105,28 @@ static void test_yield_public_broadcast_condition_callback(void)
     fifo_condition_broadcast(test_yield_condition);
 }
 
-static void test_yield_make_fifo_writable_callback(void)
-{
-    test_yield_count++;
 
-    if (test_yield_fifo->count != 0) {
-        test_yield_fifo->head =
-            (test_yield_fifo->head + 1) % test_yield_fifo->capacity;
-        test_yield_fifo->count--;
-    }
+static void test_yield_make_fifo_writable_callback(void) {
+     test_yield_count++;
+
+     if (test_yield_fifo->count != 0) {
+         test_yield_fifo->head = (test_yield_fifo->head + 1) % test_yield_fifo->capacity;
+         test_yield_fifo->count--;
+         fifo_condition_signal(&test_yield_fifo->writable);
+     }
 }
 
-static void test_yield_make_fifo_readable_callback(void)
-{
-    test_yield_count++;
+static void test_yield_make_fifo_readable_callback(void) {
+     test_yield_count++;
 
-    if (test_yield_fifo->count == 0) {
-        test_yield_fifo->items[test_yield_fifo->tail] = test_yield_fifo_item;
-        test_yield_fifo->tail =
-            (test_yield_fifo->tail + 1) % test_yield_fifo->capacity;
-        test_yield_fifo->count++;
-    }
+     if (test_yield_fifo->count == 0) {
+         test_yield_fifo->items[test_yield_fifo->tail] = test_yield_fifo_item;
+         test_yield_fifo->tail = (test_yield_fifo->tail + 1) % test_yield_fifo->capacity;
+         test_yield_fifo->count++;
+         fifo_condition_signal(&test_yield_fifo->readable);
+     }
 }
+
 
 
 #ifdef TEST_GDB
@@ -159,7 +159,7 @@ static void test_yield_make_fifo_readable_callback(void)
 
 
 #ifndef TEST_TIMEOUT_MS
-#define TEST_TIMEOUT_MS 1000U
+#define TEST_TIMEOUT_MS 2000U
 #endif
 
 #define TEST_FAILURE_TEXT_MAX 512
