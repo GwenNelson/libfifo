@@ -68,7 +68,7 @@ static void test_yield_post_semaphore_callback(void)
 static void test_yield_signal_condition_callback(void)
 {
     test_yield_count++;
-    atomic_fetch_add_explicit(&test_yield_condition->sequence, 1,
+    atomic_fetch_add_explicit(&test_yield_condition->wake_ticket, 1,
                               memory_order_relaxed);
 }
 
@@ -83,7 +83,7 @@ static void test_yield_signal_condition_check_mutex_callback(void)
                              memory_order_relaxed) == 0)
         test_condition_wait_saw_unlocked = true;
 
-    atomic_fetch_add_explicit(&test_yield_condition->sequence, 1,
+    atomic_fetch_add_explicit(&test_yield_condition->wake_ticket, 1,
                               memory_order_relaxed);
 }
 
@@ -523,14 +523,20 @@ static int test_condition_init(void)
 {
     fifo_condition_t condition;
 
-    atomic_store_explicit(&condition.sequence,
+    atomic_store_explicit(&condition.next_ticket,
                           0x5a5a5a5aU,
+                          memory_order_relaxed);
+    atomic_store_explicit(&condition.wake_ticket,
+                          0xa5a5a5a5U,
                           memory_order_relaxed);
 
     fifo_condition_init(&condition);
 
-    ASSERT("condition initialisation must reset sequence",
-           atomic_load_explicit(&condition.sequence,
+    ASSERT("condition initialisation must reset next_ticket",
+           atomic_load_explicit(&condition.next_ticket,
+                                memory_order_relaxed) == 0);
+    ASSERT("condition initialisation must reset wake_ticket",
+           atomic_load_explicit(&condition.wake_ticket,
                                 memory_order_relaxed) == 0);
 
     return 0;
@@ -2319,31 +2325,68 @@ static int test_individual_semaphore_post_after_consumption(void)
 /* fifo_condition_init(), signal(), broadcast() */
 
 
-static int test_individual_condition_init_sequence(void)
+static int test_individual_condition_init_tickets(void)
 {
     fifo_condition_t condition;
-    atomic_store_explicit(&condition.sequence, 0x5a5a5a5aU,
+
+    atomic_store_explicit(&condition.next_ticket, 0x5a5a5a5aU,
+                          memory_order_relaxed);
+    atomic_store_explicit(&condition.wake_ticket, 0xa5a5a5a5U,
                           memory_order_relaxed);
 
     fifo_condition_init(&condition);
 
-    ASSERT("condition_init must reset sequence to zero",
-           atomic_load_explicit(&condition.sequence,
+    ASSERT("condition_init must reset next_ticket to zero",
+           atomic_load_explicit(&condition.next_ticket,
+                                memory_order_relaxed) == 0);
+    ASSERT("condition_init must reset wake_ticket to zero",
+           atomic_load_explicit(&condition.wake_ticket,
                                 memory_order_relaxed) == 0);
     return 0;
 }
 
 
-static int test_individual_condition_signal_changes_sequence(void)
+static int test_individual_condition_signal_one_waiter(void)
 {
     fifo_condition_t condition;
-    atomic_store_explicit(&condition.sequence, 17, memory_order_relaxed);
+
+    atomic_store_explicit(&condition.next_ticket, 18, memory_order_relaxed);
+    atomic_store_explicit(&condition.wake_ticket, 17, memory_order_relaxed);
 
     fifo_condition_signal(&condition);
 
-    ASSERT("condition operation must advance sequence once per call",
-           atomic_load_explicit(&condition.sequence,
+    ASSERT("condition_signal must wake exactly one registered waiter",
+           atomic_load_explicit(&condition.wake_ticket,
                                 memory_order_relaxed) == 18);
+    ASSERT("condition_signal must not alter next_ticket",
+           atomic_load_explicit(&condition.next_ticket,
+                                memory_order_relaxed) == 18);
+    return 0;
+}
+
+
+static int test_individual_condition_signal_no_waiters(void)
+{
+    fifo_condition_t condition;
+
+    /* Positive control: prove this implementation can change wake_ticket. */
+    atomic_store_explicit(&condition.next_ticket, 18, memory_order_relaxed);
+    atomic_store_explicit(&condition.wake_ticket, 17, memory_order_relaxed);
+    fifo_condition_signal(&condition);
+    ASSERT("positive-control signal must wake an existing waiter",
+           atomic_load_explicit(&condition.wake_ticket,
+                                memory_order_relaxed) == 18);
+
+    atomic_store_explicit(&condition.next_ticket, 33, memory_order_relaxed);
+    atomic_store_explicit(&condition.wake_ticket, 33, memory_order_relaxed);
+    fifo_condition_signal(&condition);
+
+    ASSERT("signal with no registered waiter must not bank a future wakeup",
+           atomic_load_explicit(&condition.wake_ticket,
+                                memory_order_relaxed) == 33);
+    ASSERT("signal with no waiter must preserve next_ticket",
+           atomic_load_explicit(&condition.next_ticket,
+                                memory_order_relaxed) == 33);
     return 0;
 }
 
@@ -2351,154 +2394,107 @@ static int test_individual_condition_signal_changes_sequence(void)
 static int test_individual_condition_signal_repeated(void)
 {
     fifo_condition_t condition;
-    atomic_store_explicit(&condition.sequence, 17, memory_order_relaxed);
+
+    atomic_store_explicit(&condition.next_ticket, 117, memory_order_relaxed);
+    atomic_store_explicit(&condition.wake_ticket, 17, memory_order_relaxed);
+
+    for (size_t i = 0; i < 100; i++)
+        fifo_condition_signal(&condition);
+
+    ASSERT("repeated signals must wake one waiter per call",
+           atomic_load_explicit(&condition.wake_ticket,
+                                memory_order_relaxed) == 117);
+    ASSERT("repeated signals must not alter waiter allocation frontier",
+           atomic_load_explicit(&condition.next_ticket,
+                                memory_order_relaxed) == 117);
 
     fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-    fifo_condition_signal(&condition);
-
-    ASSERT("condition operation must advance sequence once per call",
-           atomic_load_explicit(&condition.sequence,
+    ASSERT("extra signal after all waiters are released must be ignored",
+           atomic_load_explicit(&condition.wake_ticket,
                                 memory_order_relaxed) == 117);
     return 0;
 }
 
 
-static int test_individual_condition_broadcast_changes_sequence(void)
+static int test_individual_condition_broadcast_waiters(void)
 {
     fifo_condition_t condition;
-    atomic_store_explicit(&condition.sequence, 17, memory_order_relaxed);
+
+    atomic_store_explicit(&condition.next_ticket, 42, memory_order_relaxed);
+    atomic_store_explicit(&condition.wake_ticket, 17, memory_order_relaxed);
 
     fifo_condition_broadcast(&condition);
 
-    ASSERT("condition operation must advance sequence once per call",
-           atomic_load_explicit(&condition.sequence,
-                                memory_order_relaxed) == 18);
+    ASSERT("condition_broadcast must wake every currently registered waiter",
+           atomic_load_explicit(&condition.wake_ticket,
+                                memory_order_relaxed) == 42);
+    ASSERT("condition_broadcast must not alter next_ticket",
+           atomic_load_explicit(&condition.next_ticket,
+                                memory_order_relaxed) == 42);
     return 0;
 }
 
 
-static int test_individual_condition_signal_broadcast_sequence(void)
+static int test_individual_condition_broadcast_no_waiters(void)
 {
     fifo_condition_t condition;
-    atomic_store_explicit(&condition.sequence, 17, memory_order_relaxed);
 
+    /* Positive control: broadcast must first demonstrate observable work. */
+    atomic_store_explicit(&condition.next_ticket, 42, memory_order_relaxed);
+    atomic_store_explicit(&condition.wake_ticket, 17, memory_order_relaxed);
     fifo_condition_broadcast(&condition);
+    ASSERT("positive-control broadcast must release registered waiters",
+           atomic_load_explicit(&condition.wake_ticket,
+                                memory_order_relaxed) == 42);
+
+    atomic_store_explicit(&condition.next_ticket, 55, memory_order_relaxed);
+    atomic_store_explicit(&condition.wake_ticket, 55, memory_order_relaxed);
     fifo_condition_broadcast(&condition);
 
-    ASSERT("condition operation must advance sequence once per call",
-           atomic_load_explicit(&condition.sequence,
-                                memory_order_relaxed) == 19);
+    ASSERT("broadcast with no waiters must not bank future wakeups",
+           atomic_load_explicit(&condition.wake_ticket,
+                                memory_order_relaxed) == 55);
+    ASSERT("broadcast with no waiters must preserve next_ticket",
+           atomic_load_explicit(&condition.next_ticket,
+                                memory_order_relaxed) == 55);
     return 0;
 }
 
+
+static int test_individual_condition_broadcast_repeated(void)
+{
+    fifo_condition_t condition;
+
+    atomic_store_explicit(&condition.next_ticket, 103, memory_order_relaxed);
+    atomic_store_explicit(&condition.wake_ticket, 100, memory_order_relaxed);
+
+    fifo_condition_broadcast(&condition);
+
+    ASSERT("first broadcast must move wake frontier to next_ticket",
+           atomic_load_explicit(&condition.wake_ticket,
+                                memory_order_relaxed) == 103);
+
+    /* Simulate three new waiters registering after the first broadcast. */
+    atomic_store_explicit(&condition.next_ticket, 106, memory_order_relaxed);
+    fifo_condition_broadcast(&condition);
+
+    ASSERT("later broadcast must release newly registered waiters",
+           atomic_load_explicit(&condition.wake_ticket,
+                                memory_order_relaxed) == 106);
+    return 0;
+}
 
 
 /* fifo_condition_wait() */
+
 
 static int test_individual_condition_wait_yields(void)
 {
     fifo_condition_t condition;
     fifo_mutex_t mutex;
 
-    atomic_store_explicit(&condition.sequence, 7, memory_order_relaxed);
+    atomic_store_explicit(&condition.next_ticket, 7, memory_order_relaxed);
+    atomic_store_explicit(&condition.wake_ticket, 7, memory_order_relaxed);
     atomic_store_explicit(&mutex.state, 1, memory_order_relaxed);
     test_yield_count = 0;
     test_yield_condition = &condition;
@@ -2511,27 +2507,14 @@ static int test_individual_condition_wait_yields(void)
 
     ASSERT("condition_wait must call platform yield while waiting",
            test_yield_count > 0);
-    ASSERT("condition_wait must observe sequence change",
-           atomic_load_explicit(&condition.sequence,
+    ASSERT("condition_wait must allocate exactly one ticket",
+           atomic_load_explicit(&condition.next_ticket,
+                                memory_order_relaxed) == 8);
+    ASSERT("condition_wait must not return before its ticket is released",
+           atomic_load_explicit(&condition.wake_ticket,
                                 memory_order_relaxed) == 8);
     ASSERT("condition_wait must return with mutex reacquired",
            atomic_load_explicit(&mutex.state, memory_order_relaxed) != 0);
-    return 0;
-}
-
-
-static int test_individual_condition_broadcast_repeated(void)
-{
-    fifo_condition_t condition;
-    atomic_store_explicit(&condition.sequence, 100, memory_order_relaxed);
-
-    fifo_condition_broadcast(&condition);
-    fifo_condition_broadcast(&condition);
-    fifo_condition_broadcast(&condition);
-
-    ASSERT("each condition_broadcast must advance sequence exactly once",
-           atomic_load_explicit(&condition.sequence,
-                                memory_order_relaxed) == 103);
     return 0;
 }
 
@@ -2541,7 +2524,8 @@ static int test_individual_condition_wait_releases_mutex(void)
     fifo_condition_t condition;
     fifo_mutex_t mutex;
 
-    atomic_store_explicit(&condition.sequence, 20, memory_order_relaxed);
+    atomic_store_explicit(&condition.next_ticket, 20, memory_order_relaxed);
+    atomic_store_explicit(&condition.wake_ticket, 20, memory_order_relaxed);
     atomic_store_explicit(&mutex.state, 1, memory_order_relaxed);
     test_yield_count = 0;
     test_yield_condition = &condition;
@@ -2557,6 +2541,9 @@ static int test_individual_condition_wait_releases_mutex(void)
 
     ASSERT("condition_wait must release mutex while waiting",
            test_condition_wait_saw_unlocked);
+    ASSERT("condition_wait must allocate one waiter ticket",
+           atomic_load_explicit(&condition.next_ticket,
+                                memory_order_relaxed) == 21);
     return 0;
 }
 
@@ -2566,7 +2553,8 @@ static int test_individual_condition_wait_reacquires_mutex(void)
     fifo_condition_t condition;
     fifo_mutex_t mutex;
 
-    atomic_store_explicit(&condition.sequence, 30, memory_order_relaxed);
+    atomic_store_explicit(&condition.next_ticket, 30, memory_order_relaxed);
+    atomic_store_explicit(&condition.wake_ticket, 30, memory_order_relaxed);
     atomic_store_explicit(&mutex.state, 1, memory_order_relaxed);
     test_yield_count = 0;
     test_yield_condition = &condition;
@@ -2580,6 +2568,9 @@ static int test_individual_condition_wait_reacquires_mutex(void)
     ASSERT("condition_wait must reacquire mutex before returning",
            atomic_load_explicit(&mutex.state,
                                 memory_order_relaxed) != 0);
+    ASSERT("condition_wait must allocate exactly one ticket",
+           atomic_load_explicit(&condition.next_ticket,
+                                memory_order_relaxed) == 31);
     return 0;
 }
 
@@ -2599,9 +2590,12 @@ static int test_condition_wait_signal(void)
     fifo_condition_wait(&condition, &mutex);
 
     ASSERT("condition wait must yield before signal", test_yield_count > 0);
-    ASSERT("signal must advance condition sequence",
-           atomic_load_explicit(&condition.sequence,
-                                memory_order_relaxed) > 0);
+    ASSERT("wait must register exactly one ticket",
+           atomic_load_explicit(&condition.next_ticket,
+                                memory_order_relaxed) == 1);
+    ASSERT("signal must release that ticket",
+           atomic_load_explicit(&condition.wake_ticket,
+                                memory_order_relaxed) == 1);
     ASSERT("condition_wait must return holding mutex",
            !fifo_mutex_trylock(&mutex));
 
@@ -2627,9 +2621,12 @@ static int test_condition_wait_broadcast(void)
     fifo_condition_wait(&condition, &mutex);
 
     ASSERT("condition wait must yield before broadcast", test_yield_count > 0);
-    ASSERT("broadcast must advance condition sequence",
-           atomic_load_explicit(&condition.sequence,
-                                memory_order_relaxed) > 0);
+    ASSERT("wait must register exactly one ticket",
+           atomic_load_explicit(&condition.next_ticket,
+                                memory_order_relaxed) == 1);
+    ASSERT("broadcast must release every registered ticket",
+           atomic_load_explicit(&condition.wake_ticket,
+                                memory_order_relaxed) == 1);
     ASSERT("condition_wait must return holding mutex",
            !fifo_mutex_trylock(&mutex));
 
@@ -2660,6 +2657,11 @@ static int test_condition_wait_unlocks_while_waiting(void)
            test_condition_wait_saw_unlocked);
     ASSERT("condition_wait must reacquire mutex before returning",
            !fifo_mutex_trylock(&mutex));
+    ASSERT("wait/unblock must advance both ticket frontiers once",
+           atomic_load_explicit(&condition.next_ticket,
+                                memory_order_relaxed) == 1 &&
+           atomic_load_explicit(&condition.wake_ticket,
+                                memory_order_relaxed) == 1);
 
     fifo_mutex_unlock(&mutex);
     fifo_set_yield_callback(NULL);
@@ -2769,8 +2771,10 @@ static int test_individual_fifo_capacity_empty(void)
     fifo.tail = 0;
     fifo.count = 0;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     ASSERT("fifo_capacity must return stored capacity",
            fifo_capacity(&fifo) == 6);
@@ -2788,8 +2792,10 @@ static int test_individual_fifo_capacity_partial(void)
     fifo.tail = 3;
     fifo.count = 3;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     ASSERT("fifo_capacity must return stored capacity",
            fifo_capacity(&fifo) == 6);
@@ -2807,8 +2813,10 @@ static int test_individual_fifo_capacity_full(void)
     fifo.tail = 0;
     fifo.count = 6;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     ASSERT("fifo_capacity must return stored capacity",
            fifo_capacity(&fifo) == 6);
@@ -2826,8 +2834,10 @@ static int test_individual_fifo_capacity_wrapped(void)
     fifo.tail = 2;
     fifo.count = 3;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     ASSERT("fifo_capacity must return stored capacity",
            fifo_capacity(&fifo) == 6);
@@ -2870,8 +2880,10 @@ static int test_individual_fifo_count_partial(void)
     fifo.tail = 3;
     fifo.count = 3;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     ASSERT("fifo_count must return exact stored count",
            fifo_count(&fifo) == 3);
@@ -2889,8 +2901,10 @@ static int test_individual_fifo_count_full(void)
     fifo.tail = 0;
     fifo.count = 8;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     ASSERT("fifo_count must return exact stored count",
            fifo_count(&fifo) == 8);
@@ -2908,8 +2922,10 @@ static int test_individual_fifo_count_after_pop(void)
     fifo.tail = 3;
     fifo.count = 2;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     ASSERT("fifo_count must return exact stored count",
            fifo_count(&fifo) == 2);
@@ -2927,8 +2943,10 @@ static int test_individual_fifo_count_failed_push(void)
     fifo.tail = 4;
     fifo.count = 8;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     ASSERT("fifo_count must return exact stored count",
            fifo_count(&fifo) == 8);
@@ -2968,8 +2986,10 @@ static int test_individual_fifo_count_wrapped(void)
     fifo.tail = 3;
     fifo.count = 5;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     ASSERT("fifo_count must return exact stored count",
            fifo_count(&fifo) == 5);
@@ -2990,8 +3010,10 @@ static int test_individual_fifo_empty_initial(void)
     fifo.tail = 0;
     fifo.count = 0;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     ASSERT("fifo_empty must reflect count state",
            fifo_empty(&fifo) == true);
@@ -3054,8 +3076,10 @@ static int test_individual_fifo_empty_after_drain(void)
     fifo.tail = 3;
     fifo.count = 0;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     ASSERT("fifo_empty must reflect count state",
            fifo_empty(&fifo) == true);
@@ -3145,8 +3169,10 @@ static int test_individual_fifo_full_exact(void)
     fifo.tail = 0;
     fifo.count = 4;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     ASSERT("fifo_full must reflect count/capacity state",
            fifo_full(&fifo) == true);
@@ -3164,8 +3190,10 @@ static int test_individual_fifo_full_after_failed_push(void)
     fifo.tail = 2;
     fifo.count = 4;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     ASSERT("fifo_full must reflect count/capacity state",
            fifo_full(&fifo) == true);
@@ -3205,8 +3233,10 @@ static int test_individual_fifo_full_capacity_one(void)
     fifo.tail = 0;
     fifo.count = 1;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     ASSERT("fifo_full must reflect count/capacity state",
            fifo_full(&fifo) == true);
@@ -3224,8 +3254,10 @@ static int test_individual_fifo_full_after_wrap_refill(void)
     fifo.tail = 2;
     fifo.count = 4;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     ASSERT("fifo_full must reflect count/capacity state",
            fifo_full(&fifo) == true);
@@ -3246,8 +3278,10 @@ static int test_individual_fifo_push_empty(void)
     fifo.tail = 0;
     fifo.count = 0;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     bool result = fifo_push(&fifo, (void *)(uintptr_t)123);
 
@@ -3271,8 +3305,10 @@ static int test_individual_fifo_push_partial(void)
     fifo.tail = 2;
     fifo.count = 2;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     bool result = fifo_push(&fifo, (void *)(uintptr_t)123);
 
@@ -3296,8 +3332,10 @@ static int test_individual_fifo_push_exact_capacity(void)
     fifo.tail = 3;
     fifo.count = 3;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     bool result = fifo_push(&fifo, (void *)(uintptr_t)123);
 
@@ -3359,8 +3397,10 @@ static int test_individual_fifo_push_null(void)
     fifo.tail = 0;
     fifo.count = 0;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     bool result = fifo_push(&fifo, NULL);
 
@@ -3384,8 +3424,10 @@ static int test_individual_fifo_push_after_pop_wrap(void)
     fifo.tail = 1;
     fifo.count = 3;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     bool result = fifo_push(&fifo, (void *)(uintptr_t)123);
 
@@ -3409,8 +3451,10 @@ static int test_individual_fifo_push_capacity_one(void)
     fifo.tail = 0;
     fifo.count = 0;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     bool result = fifo_push(&fifo, (void *)(uintptr_t)123);
 
@@ -3477,8 +3521,10 @@ static int test_individual_fifo_pop_single(void)
     fifo.tail = 1;
     fifo.count = 1;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
     storage[0] = (void *)(uintptr_t)123;
     void *item = (void *)(uintptr_t)0xdead;
 
@@ -3503,8 +3549,10 @@ static int test_individual_fifo_pop_partial(void)
     fifo.tail = 0;
     fifo.count = 3;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
     storage[1] = (void *)(uintptr_t)123;
     void *item = (void *)(uintptr_t)0xdead;
 
@@ -3529,8 +3577,10 @@ static int test_individual_fifo_pop_full(void)
     fifo.tail = 0;
     fifo.count = 4;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
     storage[0] = (void *)(uintptr_t)123;
     void *item = (void *)(uintptr_t)0xdead;
 
@@ -3555,8 +3605,10 @@ static int test_individual_fifo_pop_null(void)
     fifo.tail = 1;
     fifo.count = 1;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
     storage[0] = NULL;
     void *item = (void *)(uintptr_t)0xdead;
 
@@ -3581,8 +3633,10 @@ static int test_individual_fifo_pop_wrapped(void)
     fifo.tail = 2;
     fifo.count = 3;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
     storage[3] = (void *)(uintptr_t)123;
     void *item = (void *)(uintptr_t)0xdead;
 
@@ -3607,8 +3661,10 @@ static int test_individual_fifo_pop_capacity_one_reuse(void)
     fifo.tail = 0;
     fifo.count = 1;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
     storage[0] = (void *)(uintptr_t)123;
     void *item = (void *)(uintptr_t)0xdead;
 
@@ -3678,8 +3734,10 @@ static int test_individual_fifo_peek_single(void)
     fifo.tail = 1;
     fifo.count = 1;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
     storage[0] = (void *)(uintptr_t)123;
     void *item = (void *)(uintptr_t)0xdead;
     size_t old_head = fifo.head;
@@ -3708,8 +3766,10 @@ static int test_individual_fifo_peek_partial(void)
     fifo.tail = 0;
     fifo.count = 3;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
     storage[1] = (void *)(uintptr_t)123;
     void *item = (void *)(uintptr_t)0xdead;
     size_t old_head = fifo.head;
@@ -3738,8 +3798,10 @@ static int test_individual_fifo_peek_full(void)
     fifo.tail = 0;
     fifo.count = 4;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
     storage[0] = (void *)(uintptr_t)123;
     void *item = (void *)(uintptr_t)0xdead;
     size_t old_head = fifo.head;
@@ -3768,8 +3830,10 @@ static int test_individual_fifo_peek_null(void)
     fifo.tail = 1;
     fifo.count = 1;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
     storage[0] = NULL;
     void *item = (void *)(uintptr_t)0xdead;
     size_t old_head = fifo.head;
@@ -3798,8 +3862,10 @@ static int test_individual_fifo_peek_wrapped(void)
     fifo.tail = 2;
     fifo.count = 3;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
     storage[3] = (void *)(uintptr_t)123;
     void *item = (void *)(uintptr_t)0xdead;
     size_t old_head = fifo.head;
@@ -3828,8 +3894,10 @@ static int test_individual_fifo_peek_repeated(void)
     fifo.tail = 0;
     fifo.count = 2;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
     storage[2] = (void *)(uintptr_t)123;
     void *item = (void *)(uintptr_t)0xdead;
     size_t old_head = fifo.head;
@@ -3861,8 +3929,10 @@ static int test_individual_fifo_push_wait_empty(void)
     fifo.tail = 0;
     fifo.count = 0;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     fifo_push_wait(&fifo, (void *)(uintptr_t)123);
 
@@ -3883,8 +3953,10 @@ static int test_individual_fifo_push_wait_partial(void)
     fifo.tail = 2;
     fifo.count = 2;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     fifo_push_wait(&fifo, (void *)(uintptr_t)123);
 
@@ -3905,8 +3977,10 @@ static int test_individual_fifo_push_wait_last_slot(void)
     fifo.tail = 3;
     fifo.count = 3;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     fifo_push_wait(&fifo, (void *)(uintptr_t)123);
 
@@ -3927,8 +4001,10 @@ static int test_individual_fifo_push_wait_null(void)
     fifo.tail = 0;
     fifo.count = 0;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     fifo_push_wait(&fifo, NULL);
 
@@ -3949,8 +4025,10 @@ static int test_individual_fifo_push_wait_wrapped_space(void)
     fifo.tail = 1;
     fifo.count = 3;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     fifo_push_wait(&fifo, (void *)(uintptr_t)123);
 
@@ -3974,8 +4052,10 @@ static int test_individual_fifo_pop_wait_single(void)
     fifo.tail = 1;
     fifo.count = 1;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
     storage[0] = (void *)(uintptr_t)123;
 
     void *item = fifo_pop_wait(&fifo);
@@ -3997,8 +4077,10 @@ static int test_individual_fifo_pop_wait_partial(void)
     fifo.tail = 0;
     fifo.count = 3;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
     storage[1] = (void *)(uintptr_t)123;
 
     void *item = fifo_pop_wait(&fifo);
@@ -4020,8 +4102,10 @@ static int test_individual_fifo_pop_wait_full(void)
     fifo.tail = 0;
     fifo.count = 4;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
     storage[0] = (void *)(uintptr_t)123;
 
     void *item = fifo_pop_wait(&fifo);
@@ -4043,8 +4127,10 @@ static int test_individual_fifo_pop_wait_null(void)
     fifo.tail = 1;
     fifo.count = 1;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
     storage[0] = NULL;
 
     void *item = fifo_pop_wait(&fifo);
@@ -4066,8 +4152,10 @@ static int test_individual_fifo_pop_wait_wrapped(void)
     fifo.tail = 2;
     fifo.count = 3;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
     storage[3] = (void *)(uintptr_t)123;
 
     void *item = fifo_pop_wait(&fifo);
@@ -4094,8 +4182,10 @@ static int test_individual_fifo_push_wait_full_yields(void)
     fifo.tail = 0;
     fifo.count = 2;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     test_yield_count = 0;
     test_yield_fifo = &fifo;
@@ -4128,8 +4218,10 @@ static int test_individual_fifo_pop_wait_empty_yields(void)
     fifo.tail = 0;
     fifo.count = 0;
     atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.readable.sequence, 0, memory_order_relaxed);
-    atomic_store_explicit(&fifo.writable.sequence, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.readable.wake_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&fifo.writable.wake_ticket, 0, memory_order_relaxed);
 
     test_yield_count = 0;
     test_yield_fifo = &fifo;
@@ -4480,6 +4572,9 @@ static void *pthread_condition_waiter(void *opaque)
 {
     struct pthread_condition_arg *arg = opaque;
 
+    pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+
     fifo_mutex_lock(arg->mutex);
     atomic_fetch_add_explicit(arg->ready, 1, memory_order_release);
     fifo_condition_wait(arg->condition, arg->mutex);
@@ -4493,6 +4588,27 @@ static void pthread_wait_until_count(atomic_size_t *value, size_t expected)
 {
     while (atomic_load_explicit(value, memory_order_acquire) < expected)
         sched_yield();
+}
+
+static bool pthread_wait_until_uint_bounded(atomic_uint *value,
+                                             unsigned int expected)
+{
+    for (size_t i = 0; i < 100000; i++) {
+        if (atomic_load_explicit(value, memory_order_acquire) >= expected)
+            return true;
+        sched_yield();
+    }
+
+    return false;
+}
+
+static void pthread_cancel_many(pthread_t *threads, size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        pthread_cancel(threads[i]);
+
+    for (size_t i = 0; i < count; i++)
+        pthread_join(threads[i], NULL);
 }
 
 static int run_pthread_condition_broadcast(size_t thread_count)
@@ -4522,8 +4638,22 @@ static int run_pthread_condition_broadcast(size_t thread_count)
                               args, sizeof(args[0])) == 0);
 
     pthread_wait_until_count(&ready, thread_count);
+
+    if (!pthread_wait_until_uint_bounded(&condition.next_ticket,
+                                         (unsigned int)thread_count)) {
+        pthread_cancel_many(threads, thread_count);
+        ASSERT("every condition waiter must register a ticket before broadcast",
+               false);
+    }
+
+    ASSERT("registered broadcast waiters must still be asleep",
+           atomic_load_explicit(&completed, memory_order_acquire) == 0);
+
     fifo_condition_broadcast(&condition);
 
+    ASSERT("broadcast must move wake frontier across every registered waiter",
+           atomic_load_explicit(&condition.wake_ticket,
+                                memory_order_acquire) == thread_count);
     ASSERT("broadcast waiter threads must join",
            pthread_join_many(threads, thread_count) == 0);
     ASSERT("broadcast must release every waiter",
@@ -4571,8 +4701,21 @@ static int test_pthread_condition_signal_one(void)
            pthread_create(&thread, NULL, pthread_condition_waiter, &arg) == 0);
 
     pthread_wait_until_count(&ready, 1);
+
+    if (!pthread_wait_until_uint_bounded(&condition.next_ticket, 1)) {
+        pthread_cancel(thread);
+        pthread_join(thread, NULL);
+        ASSERT("single condition waiter must register a ticket", false);
+    }
+
+    ASSERT("single registered waiter must still be asleep before signal",
+           atomic_load_explicit(&completed, memory_order_acquire) == 0);
+
     fifo_condition_signal(&condition);
 
+    ASSERT("signal must advance wake frontier by exactly one ticket",
+           atomic_load_explicit(&condition.wake_ticket,
+                                memory_order_acquire) == 1);
     ASSERT("single condition waiter must join",
            pthread_join(thread, NULL) == 0);
     ASSERT("signal must release the single waiter",
@@ -4614,23 +4757,39 @@ static int run_pthread_condition_signal_one_of_many(size_t thread_count)
                               args, sizeof(args[0])) == 0);
 
     pthread_wait_until_count(&ready, thread_count);
+
+    if (!pthread_wait_until_uint_bounded(&condition.next_ticket,
+                                         (unsigned int)thread_count)) {
+        pthread_cancel_many(threads, thread_count);
+        ASSERT("every condition waiter must register a ticket before signal",
+               false);
+    }
+
+    ASSERT("all registered waiters must still be asleep before signal",
+           atomic_load_explicit(&completed, memory_order_acquire) == 0);
+
     fifo_condition_signal(&condition);
 
-    /*
-     * Give all threads made runnable by the signal ample opportunity to
-     * complete before measuring.  This is deliberately not a correctness
-     * timeout; it only exposes an over-broad wakeup before cleanup.
-     */
-    for (size_t i = 0; i < 10000; i++)
+    ASSERT("signal with many waiters must advance wake frontier exactly once",
+           atomic_load_explicit(&condition.wake_ticket,
+                                memory_order_acquire) == 1);
+
+    for (size_t i = 0; i < 10000; i++) {
+        if (atomic_load_explicit(&completed, memory_order_acquire) != 0)
+            break;
         sched_yield();
+    }
 
     observed = atomic_load_explicit(&completed, memory_order_acquire);
 
     fifo_condition_broadcast(&condition);
 
+    ASSERT("cleanup broadcast must move wake frontier to all registered waiters",
+           atomic_load_explicit(&condition.wake_ticket,
+                                memory_order_acquire) == thread_count);
     ASSERT("condition waiter threads must join after cleanup broadcast",
            pthread_join_many(threads, thread_count) == 0);
-    ASSERT("signal with multiple waiters must release exactly one waiter",
+    ASSERT("signal with multiple waiters must release one real waiter",
            observed == 1);
     ASSERT("cleanup broadcast must release all remaining waiters",
            atomic_load_explicit(&completed, memory_order_acquire) ==
@@ -4872,12 +5031,13 @@ int main(int argc, char **argv)
 
     fprintf(stdout, "\nfifo_condition_init()/signal()/broadcast()\n");
     fprintf(stdout, "----------------------------------------------------------------------\n");
-    TEST("condition_init resets sequence",                  test_individual_condition_init_sequence)
-    TEST("condition_signal advances sequence",              test_individual_condition_signal_changes_sequence)
-    TEST("condition_signal advances every time",            test_individual_condition_signal_repeated)
-    TEST("condition_broadcast advances sequence",           test_individual_condition_broadcast_changes_sequence)
-    TEST("condition signal/broadcast both advance",         test_individual_condition_signal_broadcast_sequence)
-    TEST("condition_broadcast advances every time",        test_individual_condition_broadcast_repeated)
+    TEST("condition_init resets ticket state",              test_individual_condition_init_tickets)
+    TEST("condition_signal wakes one waiter",               test_individual_condition_signal_one_waiter)
+    TEST("condition_signal ignores no-waiter case",         test_individual_condition_signal_no_waiters)
+    TEST("condition_signal wakes one per call",             test_individual_condition_signal_repeated)
+    TEST("condition_broadcast wakes all waiters",           test_individual_condition_broadcast_waiters)
+    TEST("condition_broadcast ignores no-waiter case",      test_individual_condition_broadcast_no_waiters)
+    TEST("condition_broadcast handles new waiter batches",  test_individual_condition_broadcast_repeated)
     TEST("condition_wait releases mutex while waiting",     test_individual_condition_wait_releases_mutex)
     TEST("condition_wait reacquires mutex before return",    test_individual_condition_wait_reacquires_mutex)
 

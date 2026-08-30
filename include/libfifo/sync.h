@@ -81,8 +81,10 @@ void fifo_semaphore_post(fifo_semaphore_t *semaphore);
  */
 
 typedef struct fifo_condition {
-    atomic_uint sequence;
+    atomic_uint next_ticket;
+    atomic_uint wake_ticket;
 } fifo_condition_t;
+
 
 void fifo_condition_init(fifo_condition_t *condition);
 
