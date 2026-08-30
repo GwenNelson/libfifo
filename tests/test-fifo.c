@@ -497,20 +497,16 @@ static int test_semaphore_multiple_posts(void)
 static int test_condition_init(void)
 {
     fifo_condition_t condition;
-    fifo_mutex_t mutex;
+
+    atomic_store_explicit(&condition.sequence,
+                          0x5a5a5a5aU,
+                          memory_order_relaxed);
 
     fifo_condition_init(&condition);
-    fifo_mutex_init(&mutex);
 
-    ASSERT("mutex associated with condition machinery must work",
-           fifo_mutex_trylock(&mutex));
-
-    fifo_mutex_unlock(&mutex);
-
-    ASSERT("mutex must remain usable after condition initialisation",
-           fifo_mutex_trylock(&mutex));
-
-    fifo_mutex_unlock(&mutex);
+    ASSERT("condition initialisation must reset sequence",
+           atomic_load_explicit(&condition.sequence,
+                                memory_order_relaxed) == 0);
 
     return 0;
 }
