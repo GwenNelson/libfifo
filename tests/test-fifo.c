@@ -3341,6 +3341,7 @@ static int test_individual_fifo_empty_partial(void)
            !fifo_empty(&fifo));
 
     fifo.count = 0;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
     fifo.tail = fifo.head;
 
     ASSERT("same fifo_empty implementation must recognise empty FIFO",
@@ -3364,6 +3365,7 @@ static int test_individual_fifo_empty_full(void)
            !fifo_empty(&fifo));
 
     fifo.count = 0;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
 
     ASSERT("same fifo_empty implementation must recognise empty FIFO",
            fifo_empty(&fifo));
@@ -3408,6 +3410,7 @@ static int test_individual_fifo_empty_null_item(void)
            !fifo_empty(&fifo));
 
     fifo.count = 0;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
     fifo.tail = fifo.head;
 
     ASSERT("same fifo_empty implementation must recognise empty FIFO",
@@ -3434,6 +3437,7 @@ static int test_individual_fifo_full_initial(void)
            !fifo_full(&fifo));
 
     fifo.count = fifo.capacity;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
 
     ASSERT("same fifo_full implementation must recognise full FIFO",
            fifo_full(&fifo));
@@ -3456,6 +3460,7 @@ static int test_individual_fifo_full_partial(void)
            !fifo_full(&fifo));
 
     fifo.count = fifo.capacity;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
     fifo.tail = fifo.head;
 
     ASSERT("same fifo_full implementation must recognise full FIFO",
@@ -3521,6 +3526,7 @@ static int test_individual_fifo_full_after_pop(void)
            !fifo_full(&fifo));
 
     fifo.count = fifo.capacity;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
 
     ASSERT("same fifo_full implementation must recognise full FIFO",
            fifo_full(&fifo));
@@ -3678,6 +3684,7 @@ static int test_individual_fifo_push_full_failure(void)
     fifo.head = 0;
     fifo.tail = 0;
     fifo.count = 0;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
     storage[0] = (void *)(uintptr_t)777;
 
     result = fifo_push(&fifo, (void *)(uintptr_t)123);
@@ -3801,6 +3808,7 @@ static int test_individual_fifo_pop_empty_failure(void)
     fifo.head = 0;
     fifo.tail = 1;
     fifo.count = 1;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
     storage[0] = (void *)(uintptr_t)123;
     item = NULL;
 
@@ -4013,6 +4021,7 @@ static int test_individual_fifo_peek_empty_failure(void)
     fifo.head = 0;
     fifo.tail = 1;
     fifo.count = 1;
+    atomic_store_explicit(&fifo.lock.state, 0, memory_order_relaxed);
     storage[0] = (void *)(uintptr_t)123;
     item = NULL;
 
