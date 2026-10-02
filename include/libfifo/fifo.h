@@ -44,6 +44,25 @@ void fifo_init(fifo_t *fifo,
                void **storage,
                size_t capacity);
 
+/*
+ * Replace a FIFO's caller-provided backing storage and capacity.
+ *
+ * new_storage must provide space for new_capacity void pointers and must be
+ * distinct from the FIFO's current storage. The caller retains ownership of
+ * both storage arrays; libfifo never allocates or frees them. This operation
+ * preserves all queued items in FIFO order and fails if new_capacity is zero
+ * or smaller than the current item count. On success, the FIFO uses only
+ * new_storage after this function returns, so the caller may then free the old
+ * storage. On failure, the FIFO and its original storage remain unchanged.
+ *
+ * The operation uses the FIFO's internal lock and is safe alongside the other
+ * FIFO operations, including the blocking push and pop operations. FIFOs do
+ * not otherwise grow automatically.
+ */
+bool fifo_resize(fifo_t *fifo,
+                 void **new_storage,
+                 size_t new_capacity);
+
 size_t fifo_capacity(const fifo_t *fifo);
 size_t fifo_count(fifo_t *fifo);
 

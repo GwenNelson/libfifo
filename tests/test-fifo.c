@@ -840,6 +840,228 @@ static int test_fifo_capacity_one(void)
 
 
 /*
+ * FIFO backing-storage resize tests
+ */
+
+static int test_fifo_resize_empty(void)
+{
+    fifo_t fifo;
+    void *storage[2];
+    void *replacement[4];
+
+    fifo_init(&fifo, storage, 2);
+
+    ASSERT("empty FIFO must resize", fifo_resize(&fifo, replacement, 4));
+    ASSERT("resize must install new storage", fifo.items == replacement);
+    ASSERT("resize must update capacity", fifo_capacity(&fifo) == 4);
+    ASSERT("empty FIFO must remain empty", fifo_empty(&fifo));
+
+    return 0;
+}
+
+static int test_fifo_resize_partial_preserves_order(void)
+{
+    fifo_t fifo;
+    void *storage[5];
+    void *replacement[6];
+    void *item;
+
+    fifo_init(&fifo, storage, 5);
+    ASSERT("setup first push must succeed", fifo_push(&fifo, (void *)1));
+    ASSERT("setup second push must succeed", fifo_push(&fifo, (void *)2));
+    ASSERT("setup third push must succeed", fifo_push(&fifo, (void *)3));
+    ASSERT("partially filled FIFO must resize",
+           fifo_resize(&fifo, replacement, 6));
+    ASSERT("first item must remain first after resize",
+           fifo_pop(&fifo, &item) && (uintptr_t)item == 1);
+    ASSERT("second item must remain second after resize",
+           fifo_pop(&fifo, &item) && (uintptr_t)item == 2);
+    ASSERT("third item must remain third after resize",
+           fifo_pop(&fifo, &item) && (uintptr_t)item == 3);
+
+    return 0;
+}
+
+static int test_fifo_resize_wrapped_preserves_order(void)
+{
+    fifo_t fifo;
+    void *storage[5];
+    void *replacement[7];
+    void *item;
+
+    fifo_init(&fifo, storage, 5);
+    for (uintptr_t i = 1; i <= 4; i++)
+        ASSERT("setup push must succeed", fifo_push(&fifo, (void *)i));
+    for (uintptr_t i = 1; i <= 3; i++) {
+        ASSERT("setup pop must succeed", fifo_pop(&fifo, &item));
+        ASSERT("setup pop must return expected item", (uintptr_t)item == i);
+    }
+    for (uintptr_t i = 5; i <= 7; i++)
+        ASSERT("wrapped setup push must succeed", fifo_push(&fifo, (void *)i));
+
+    ASSERT("wrapped FIFO must resize", fifo_resize(&fifo, replacement, 7));
+    for (uintptr_t i = 4; i <= 7; i++) {
+        ASSERT("wrapped FIFO pop must succeed", fifo_pop(&fifo, &item));
+        ASSERT("wrapped FIFO order must be preserved", (uintptr_t)item == i);
+    }
+
+    return 0;
+}
+
+static int test_fifo_resize_full_then_push(void)
+{
+    fifo_t fifo;
+    void *storage[3];
+    void *replacement[5];
+    void *item;
+
+    fifo_init(&fifo, storage, 3);
+    for (uintptr_t i = 1; i <= 3; i++)
+        ASSERT("setup full push must succeed", fifo_push(&fifo, (void *)i));
+    ASSERT("full FIFO must grow", fifo_resize(&fifo, replacement, 5));
+    ASSERT("grown FIFO must accept another item",
+           fifo_push(&fifo, (void *)(uintptr_t)4));
+    ASSERT("grown FIFO must accept the last item",
+           fifo_push(&fifo, (void *)(uintptr_t)5));
+    for (uintptr_t i = 1; i <= 5; i++) {
+        ASSERT("grown FIFO pop must succeed", fifo_pop(&fifo, &item));
+        ASSERT("grown FIFO order must be preserved", (uintptr_t)item == i);
+    }
+
+    return 0;
+}
+
+static int test_fifo_resize_exact_count_and_failure(void)
+{
+    fifo_t fifo;
+    void *storage[5];
+    void *too_small[2];
+    void *exact[3];
+    void *item;
+
+    fifo_init(&fifo, storage, 5);
+    for (uintptr_t i = 1; i <= 3; i++)
+        ASSERT("setup push must succeed", fifo_push(&fifo, (void *)i));
+
+    ASSERT("resize below count must fail",
+           !fifo_resize(&fifo, too_small, 2));
+    ASSERT("failed resize must retain original storage", fifo.items == storage);
+    ASSERT("failed resize must retain original capacity", fifo_capacity(&fifo) == 5);
+    ASSERT("failed resize must retain original count", fifo_count(&fifo) == 3);
+    ASSERT("failed resize must leave FIFO usable",
+           fifo_push(&fifo, (void *)(uintptr_t)4));
+    ASSERT("failed resize must retain original capacity",
+           fifo_capacity(&fifo) == 5);
+    ASSERT("original FIFO must still accept remaining capacity",
+           fifo_push(&fifo, (void *)(uintptr_t)5));
+    ASSERT("FIFO must be full at original capacity", fifo_full(&fifo));
+    for (uintptr_t i = 1; i <= 5; i++) {
+        ASSERT("FIFO after failed resize must pop", fifo_pop(&fifo, &item));
+        ASSERT("FIFO after failed resize must preserve order",
+               (uintptr_t)item == i);
+    }
+
+    ASSERT("setup for exact resize must succeed",
+           fifo_push(&fifo, (void *)(uintptr_t)5));
+    ASSERT("setup for exact resize must succeed",
+           fifo_push(&fifo, (void *)(uintptr_t)6));
+    ASSERT("setup for exact resize must succeed",
+           fifo_push(&fifo, (void *)(uintptr_t)7));
+    ASSERT("resize with null FIFO must fail",
+           !fifo_resize(NULL, exact, 3));
+    ASSERT("resize with null storage must fail",
+           !fifo_resize(&fifo, NULL, 3));
+    ASSERT("resize with zero capacity must fail",
+           !fifo_resize(&fifo, exact, 0));
+    ASSERT("resize with current storage must fail",
+           !fifo_resize(&fifo, storage, 5));
+    ASSERT("resize to exactly item count must succeed",
+           fifo_resize(&fifo, exact, 3));
+    ASSERT("exact resize capacity must match count", fifo_capacity(&fifo) == 3);
+    for (uintptr_t i = 5; i <= 7; i++) {
+        ASSERT("exact-size FIFO pop must succeed", fifo_pop(&fifo, &item));
+        ASSERT("exact-size FIFO must preserve order", (uintptr_t)item == i);
+    }
+
+    return 0;
+}
+
+struct fifo_resize_concurrent_args {
+    fifo_t *fifo;
+    void **first_storage;
+    void **second_storage;
+    atomic_bool failed;
+};
+
+static void *fifo_resize_worker(void *opaque)
+{
+    struct fifo_resize_concurrent_args *args = opaque;
+
+    for (uintptr_t i = 1; i <= 20000; i++) {
+        void *item;
+
+        while (!fifo_push(args->fifo, (void *)i))
+            sched_yield();
+        while (!fifo_pop(args->fifo, &item))
+            sched_yield();
+        if ((uintptr_t)item != i) {
+            atomic_store_explicit(&args->failed, true, memory_order_relaxed);
+            return NULL;
+        }
+    }
+
+    return NULL;
+}
+
+static void *fifo_resize_thread(void *opaque)
+{
+    struct fifo_resize_concurrent_args *args = opaque;
+
+    for (size_t i = 0; i < 20000; i++) {
+        void **storage = (i % 2 == 0) ? args->first_storage : args->second_storage;
+        size_t capacity = (i % 2 == 0) ? 2 : 3;
+
+        if (!fifo_resize(args->fifo, storage, capacity)) {
+            atomic_store_explicit(&args->failed, true, memory_order_relaxed);
+            return NULL;
+        }
+    }
+
+    return NULL;
+}
+
+static int test_pthread_fifo_resize_during_operations(void)
+{
+    fifo_t fifo;
+    void *initial_storage[3];
+    void *first_storage[2];
+    void *second_storage[3];
+    struct fifo_resize_concurrent_args args;
+    pthread_t worker;
+    pthread_t resizer;
+
+    fifo_init(&fifo, initial_storage, 3);
+    args.fifo = &fifo;
+    args.first_storage = first_storage;
+    args.second_storage = second_storage;
+    atomic_init(&args.failed, false);
+
+    ASSERT("resize worker must start", pthread_create(&worker, NULL,
+           fifo_resize_worker, &args) == 0);
+    ASSERT("resize thread must start", pthread_create(&resizer, NULL,
+           fifo_resize_thread, &args) == 0);
+    ASSERT("resize worker must join", pthread_join(worker, NULL) == 0);
+    ASSERT("resize thread must join", pthread_join(resizer, NULL) == 0);
+    ASSERT("concurrent resize and FIFO operations must preserve items",
+           !atomic_load_explicit(&args.failed, memory_order_relaxed));
+    ASSERT("concurrent resize test must finish with empty FIFO",
+           fifo_empty(&fifo));
+
+    return 0;
+}
+
+
+/*
  * FIFO push tests
  */
 
@@ -5585,6 +5807,16 @@ int main(int argc, char **argv)
     TEST("FIFO initially reports empty",               test_fifo_initial_empty)
     TEST("FIFO initially reports not full",            test_fifo_initial_not_full)
     TEST("FIFO supports capacity one",                 test_fifo_capacity_one)
+
+    fprintf(stdout, "\nFIFO resize\n");
+    fprintf(stdout, "----------------------------------------------------------------------\n");
+
+    TEST("Resize empty FIFO",                          test_fifo_resize_empty)
+    TEST("Resize partial FIFO preserves order",         test_fifo_resize_partial_preserves_order)
+    TEST("Resize wrapped FIFO preserves order",         test_fifo_resize_wrapped_preserves_order)
+    TEST("Grow full FIFO and push more items",          test_fifo_resize_full_then_push)
+    TEST("Resize failure preserves original FIFO",      test_fifo_resize_exact_count_and_failure)
+    TEST("Resize concurrently with FIFO operations",    test_pthread_fifo_resize_during_operations)
 
     fprintf(stdout, "\nFIFO push\n");
     fprintf(stdout, "----------------------------------------------------------------------\n");

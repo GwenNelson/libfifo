@@ -42,6 +42,34 @@ size_t fifo_count(fifo_t *fifo) {
        return count;
 }
 
+bool fifo_resize(fifo_t *fifo, void **new_storage, size_t new_capacity) {
+       size_t count;
+
+       if (fifo == NULL || new_storage == NULL || new_capacity == 0)
+           return false;
+
+       fifo_mutex_lock(&fifo->lock);
+
+       if (new_storage == fifo->items || new_capacity < fifo->count) {
+           fifo_mutex_unlock(&fifo->lock);
+           return false;
+       }
+
+       count = fifo->count;
+       for (size_t i = 0; i < count; i++)
+           new_storage[i] = fifo->items[(fifo->head + i) % fifo->capacity];
+
+       fifo->items = new_storage;
+       fifo->capacity = new_capacity;
+       fifo->head = 0;
+       fifo->tail = count % new_capacity;
+
+       fifo_condition_broadcast(&fifo->writable);
+       fifo_mutex_unlock(&fifo->lock);
+
+       return true;
+}
+
 
 bool fifo_empty(fifo_t *fifo) {
      bool empty;
